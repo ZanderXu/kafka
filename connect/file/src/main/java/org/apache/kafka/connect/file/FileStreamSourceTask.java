@@ -17,12 +17,13 @@
 package org.apache.kafka.connect.file;
 
 import java.io.BufferedReader;
-import java.io.FileInputStream;
-import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -47,11 +48,21 @@ public class FileStreamSourceTask extends SourceTask {
     private String filename;
     private InputStream stream;
     private BufferedReader reader = null;
-    private char[] buffer = new char[1024];
+    private char[] buffer;
     private int offset = 0;
     private String topic = null;
+    private int batchSize = FileStreamSourceConnector.DEFAULT_TASK_BATCH_SIZE;
 
     private Long streamOffset;
+
+    public FileStreamSourceTask() {
+        this(1024);
+    }
+
+    /* visible for testing */
+    FileStreamSourceTask(int initialBufferSize) {
+        buffer = new char[initialBufferSize];
+    }
 
     @Override
     public String version() {
@@ -67,16 +78,17 @@ public class FileStreamSourceTask extends SourceTask {
             streamOffset = null;
             reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8));
         }
+        // Missing topic or parsing error is not possible because we've parsed the config in the
+        // Connector
         topic = props.get(FileStreamSourceConnector.TOPIC_CONFIG);
-        if (topic == null)
-            throw new ConnectException("FileStreamSourceTask config missing topic setting");
+        batchSize = Integer.parseInt(props.get(FileStreamSourceConnector.TASK_BATCH_SIZE_CONFIG));
     }
 
     @Override
     public List<SourceRecord> poll() throws InterruptedException {
         if (stream == null) {
             try {
-                stream = new FileInputStream(filename);
+                stream = Files.newInputStream(Paths.get(filename));
                 Map<String, Object> offset = context.offsetStorageReader().offset(Collections.singletonMap(FILENAME_FIELD, filename));
                 if (offset != null) {
                     Object lastRecordedOffset = offset.get(POSITION_FIELD);
@@ -90,7 +102,7 @@ public class FileStreamSourceTask extends SourceTask {
                                 long skipped = stream.skip(skipLeft);
                                 skipLeft -= skipped;
                             } catch (IOException e) {
-                                log.error("Error while trying to seek to previous offset in file: ", e);
+                                log.error("Error while trying to seek to previous offset in file {}: ", filename, e);
                                 throw new ConnectException(e);
                             }
                         }
@@ -102,12 +114,15 @@ public class FileStreamSourceTask extends SourceTask {
                 }
                 reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8));
                 log.debug("Opened {} for reading", logFilename());
-            } catch (FileNotFoundException e) {
+            } catch (NoSuchFileException e) {
                 log.warn("Couldn't find file {} for FileStreamSourceTask, sleeping to wait for it to be created", logFilename());
                 synchronized (this) {
                     this.wait(1000);
                 }
                 return null;
+            } catch (IOException e) {
+                log.error("Error while trying to open file {}: ", filename, e);
+                throw new ConnectException(e);
             }
         }
 
@@ -131,23 +146,30 @@ public class FileStreamSourceTask extends SourceTask {
 
                 if (nread > 0) {
                     offset += nread;
-                    if (offset == buffer.length) {
-                        char[] newbuf = new char[buffer.length * 2];
-                        System.arraycopy(buffer, 0, newbuf, 0, buffer.length);
-                        buffer = newbuf;
-                    }
-
                     String line;
+                    boolean foundOneLine = false;
                     do {
                         line = extractLine();
                         if (line != null) {
+                            foundOneLine = true;
                             log.trace("Read a line from {}", logFilename());
                             if (records == null)
                                 records = new ArrayList<>();
                             records.add(new SourceRecord(offsetKey(filename), offsetValue(streamOffset), topic, null,
                                     null, null, VALUE_SCHEMA, line, System.currentTimeMillis()));
+
+                            if (records.size() >= batchSize) {
+                                return records;
+                            }
                         }
                     } while (line != null);
+
+                    if (!foundOneLine && offset == buffer.length) {
+                        char[] newbuf = new char[buffer.length * 2];
+                        System.arraycopy(buffer, 0, newbuf, 0, buffer.length);
+                        log.info("Increased buffer from {} to {}", buffer.length, newbuf.length);
+                        buffer = newbuf;
+                    }
                 }
             }
 
@@ -220,5 +242,10 @@ public class FileStreamSourceTask extends SourceTask {
 
     private String logFilename() {
         return filename == null ? "stdin" : filename;
+    }
+
+    /* visible for testing */
+    int bufferSize() {
+        return buffer.length;
     }
 }

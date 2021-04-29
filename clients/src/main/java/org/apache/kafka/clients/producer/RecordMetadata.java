@@ -17,7 +17,8 @@
 package org.apache.kafka.clients.producer;
 
 import org.apache.kafka.common.TopicPartition;
-import org.apache.kafka.common.record.DefaultRecord;
+import org.apache.kafka.common.record.RecordBatch;
+import org.apache.kafka.common.requests.ProduceResponse;
 
 /**
  * The metadata for a record that has been acknowledged by the server
@@ -40,61 +41,68 @@ public final class RecordMetadata {
     private final int serializedValueSize;
     private final TopicPartition topicPartition;
 
-    private volatile Long checksum;
-
-    public RecordMetadata(TopicPartition topicPartition, long baseOffset, long relativeOffset, long timestamp,
-                          Long checksum, int serializedKeySize, int serializedValueSize) {
-        // ignore the relativeOffset if the base offset is -1,
-        // since this indicates the offset is unknown
-        this.offset = baseOffset == -1 ? baseOffset : baseOffset + relativeOffset;
+    /**
+     * Creates a new instance with the provided parameters.
+     */
+    public RecordMetadata(TopicPartition topicPartition, long baseOffset, int batchIndex, long timestamp,
+                          int serializedKeySize, int serializedValueSize) {
+        // ignore the batchIndex if the base offset is -1, since this indicates the offset is unknown
+        this.offset = baseOffset == -1 ? baseOffset : baseOffset + batchIndex;
         this.timestamp = timestamp;
-        this.checksum = checksum;
         this.serializedKeySize = serializedKeySize;
         this.serializedValueSize = serializedValueSize;
         this.topicPartition = topicPartition;
     }
 
     /**
-     * @deprecated As of 0.11.0. Use @{@link RecordMetadata#RecordMetadata(TopicPartition, long, long, long, Long, int, int)}.
+     * Creates a new instance with the provided parameters.
+     *
+     * @deprecated use constructor without `checksum` parameter. This constructor will be removed in
+     *             Apache Kafka 4.0 (deprecated since 3.0).
      */
     @Deprecated
-    public RecordMetadata(TopicPartition topicPartition, long baseOffset, long relativeOffset, long timestamp,
-                          long checksum, int serializedKeySize, int serializedValueSize) {
-        this(topicPartition, baseOffset, relativeOffset, timestamp, Long.valueOf(checksum), serializedKeySize,
-                serializedValueSize);
+    public RecordMetadata(TopicPartition topicPartition, long baseOffset, long batchIndex, long timestamp,
+                          Long checksum, int serializedKeySize, int serializedValueSize) {
+        this(topicPartition, baseOffset, batchIndexToInt(batchIndex), timestamp, serializedKeySize, serializedValueSize);
+    }
+
+    private static int batchIndexToInt(long batchIndex) {
+        if (batchIndex > Integer.MAX_VALUE)
+            throw new IllegalArgumentException("batchIndex is larger than Integer.MAX_VALUE: " + batchIndex);
+        return (int) batchIndex;
+    }
+
+    /**
+     * Indicates whether the record metadata includes the offset.
+     * @return true if the offset is included in the metadata, false otherwise.
+     */
+    public boolean hasOffset() {
+        return this.offset != ProduceResponse.INVALID_OFFSET;
     }
 
     /**
      * The offset of the record in the topic/partition.
+     * @return the offset of the record, or -1 if {{@link #hasOffset()}} returns false.
      */
     public long offset() {
         return this.offset;
     }
 
     /**
-     * The timestamp of the record in the topic/partition.
+     * Indicates whether the record metadata includes the timestamp.
+     * @return true if a valid timestamp exists, false otherwise.
      */
-    public long timestamp() {
-        return timestamp;
+    public boolean hasTimestamp() {
+        return this.timestamp != RecordBatch.NO_TIMESTAMP;
     }
 
     /**
-     * The checksum (CRC32) of the record.
+     * The timestamp of the record in the topic/partition.
      *
-     * @deprecated As of Kafka 0.11.0. Because of the potential for message format conversion on the broker, the
-     *             computed checksum may not match what was stored on the broker, or what will be returned to the consumer.
-     *             It is therefore unsafe to depend on this checksum for end-to-end delivery guarantees. Additionally,
-     *             message format v2 does not include a record-level checksum (for performance, the record checksum
-     *             was replaced with a batch checksum). To maintain compatibility, a partial checksum computed from
-     *             the record timestamp, serialized key size, and serialized value size is returned instead, but
-     *             this should not be depended on for end-to-end reliability.
+     * @return the timestamp of the record, or -1 if the {{@link #hasTimestamp()}} returns false.
      */
-    @Deprecated
-    public long checksum() {
-        if (checksum == null)
-            // The checksum is null only for message format v2 and above, which do not have a record-level checksum.
-            this.checksum = DefaultRecord.computePartialChecksum(timestamp, serializedKeySize, serializedValueSize);
-        return this.checksum;
+    public long timestamp() {
+        return this.timestamp;
     }
 
     /**

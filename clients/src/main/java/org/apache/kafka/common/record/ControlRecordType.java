@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.common.record;
 
+import org.apache.kafka.common.InvalidRecordException;
 import org.apache.kafka.common.protocol.types.Field;
 import org.apache.kafka.common.protocol.types.Schema;
 import org.apache.kafka.common.protocol.types.Struct;
@@ -42,6 +43,9 @@ import java.nio.ByteBuffer;
 public enum ControlRecordType {
     ABORT((short) 0),
     COMMIT((short) 1),
+    // Raft quorum related control messages.
+    QUORUM_REASSIGNMENT((short) 2),
+    LEADER_CHANGE((short) 3),
 
     // UNKNOWN is used to indicate a control type which the client is not aware of and should be ignored
     UNKNOWN((short) -1);
@@ -92,6 +96,10 @@ public enum ControlRecordType {
                 return ABORT;
             case 1:
                 return COMMIT;
+            case 2:
+                return QUORUM_REASSIGNMENT;
+            case 3:
+                return LEADER_CHANGE;
             default:
                 return UNKNOWN;
         }

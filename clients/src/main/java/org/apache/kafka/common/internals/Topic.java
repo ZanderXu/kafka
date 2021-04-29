@@ -21,7 +21,7 @@ import org.apache.kafka.common.utils.Utils;
 
 import java.util.Collections;
 import java.util.Set;
-import java.util.regex.Pattern;
+import java.util.function.Consumer;
 
 public class Topic {
 
@@ -33,18 +33,23 @@ public class Topic {
             Utils.mkSet(GROUP_METADATA_TOPIC_NAME, TRANSACTION_STATE_TOPIC_NAME));
 
     private static final int MAX_NAME_LENGTH = 249;
-    private static final Pattern LEGAL_CHARS_PATTERN = Pattern.compile(LEGAL_CHARS + "+");
 
     public static void validate(String topic) {
-        if (topic.isEmpty())
-            throw new InvalidTopicException("Topic name is illegal, it can't be empty");
-        if (topic.equals(".") || topic.equals(".."))
-            throw new InvalidTopicException("Topic name cannot be \".\" or \"..\"");
-        if (topic.length() > MAX_NAME_LENGTH)
-            throw new InvalidTopicException("Topic name is illegal, it can't be longer than " + MAX_NAME_LENGTH +
-                    " characters, topic name: " + topic);
-        if (!containsValidPattern(topic))
-            throw new InvalidTopicException("Topic name \"" + topic + "\" is illegal, it contains a character other than " +
+        validate(topic, "Topic name", message -> {
+            throw new InvalidTopicException(message);
+        });
+    }
+
+    public static void validate(String name, String logPrefix, Consumer<String> throwableConsumer) {
+        if (name.isEmpty())
+            throwableConsumer.accept(logPrefix + " is illegal, it can't be empty");
+        if (".".equals(name) || "..".equals(name))
+            throwableConsumer.accept(logPrefix + " cannot be \".\" or \"..\"");
+        if (name.length() > MAX_NAME_LENGTH)
+            throwableConsumer.accept(logPrefix + " is illegal, it can't be longer than " + MAX_NAME_LENGTH +
+                    " characters, " + logPrefix + ": " + name);
+        if (!containsValidPattern(name))
+            throwableConsumer.accept(logPrefix + " \"" + name + "\" is illegal, it contains a character other than " +
                     "ASCII alphanumerics, '.', '_' and '-'");
     }
 
@@ -77,6 +82,15 @@ public class Topic {
      * Valid characters for Kafka topics are the ASCII alphanumerics, '.', '_', and '-'
      */
     static boolean containsValidPattern(String topic) {
-        return LEGAL_CHARS_PATTERN.matcher(topic).matches();
+        for (int i = 0; i < topic.length(); ++i) {
+            char c = topic.charAt(i);
+
+            // We don't use Character.isLetterOrDigit(c) because it's slower
+            boolean validChar = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || c == '.' ||
+                    c == '_' || c == '-';
+            if (!validChar)
+                return false;
+        }
+        return true;
     }
 }

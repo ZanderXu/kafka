@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.common.config;
 
+import org.apache.kafka.common.config.ConfigDef.CaseInsensitiveValidString;
 import org.apache.kafka.common.config.ConfigDef.Importance;
 import org.apache.kafka.common.config.ConfigDef.Range;
 import org.apache.kafka.common.config.ConfigDef.Type;
@@ -23,20 +24,26 @@ import org.apache.kafka.common.config.ConfigDef.ValidString;
 import org.apache.kafka.common.config.ConfigDef.Validator;
 import org.apache.kafka.common.config.ConfigDef.Width;
 import org.apache.kafka.common.config.types.Password;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 
 import static java.util.Arrays.asList;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.fail;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 public class ConfigDefTest {
 
@@ -78,9 +85,9 @@ public class ConfigDefTest {
         assertEquals(Password.HIDDEN, vals.get("j").toString());
     }
 
-    @Test(expected = ConfigException.class)
+    @Test
     public void testInvalidDefault() {
-        new ConfigDef().define("a", Type.INT, "hello", Importance.HIGH, "docs");
+        assertThrows(ConfigException.class, () -> new ConfigDef().define("a", Type.INT, "hello", Importance.HIGH, "docs"));
     }
 
     @Test
@@ -88,12 +95,12 @@ public class ConfigDefTest {
         ConfigDef def = new ConfigDef().define("a", Type.INT, null, null, null, "docs");
         Map<String, Object> vals = def.parse(new Properties());
 
-        assertEquals(null, vals.get("a"));
+        assertNull(vals.get("a"));
     }
 
-    @Test(expected = ConfigException.class)
+    @Test
     public void testMissingRequired() {
-        new ConfigDef().define("a", Type.INT, Importance.HIGH, "docs").parse(new HashMap<String, Object>());
+        assertThrows(ConfigException.class, () -> new ConfigDef().define("a", Type.INT, Importance.HIGH, "docs").parse(new HashMap<String, Object>()));
     }
 
     @Test
@@ -102,9 +109,10 @@ public class ConfigDefTest {
                 .parse(new HashMap<String, Object>());
     }
 
-    @Test(expected = ConfigException.class)
+    @Test
     public void testDefinedTwice() {
-        new ConfigDef().define("a", Type.STRING, Importance.HIGH, "docs").define("a", Type.INT, Importance.HIGH, "docs");
+        assertThrows(ConfigException.class, () -> new ConfigDef().define("a", Type.STRING,
+            Importance.HIGH, "docs").define("a", Type.INT, Importance.HIGH, "docs"));
     }
 
     @Test
@@ -132,14 +140,16 @@ public class ConfigDefTest {
         }
     }
 
-    @Test(expected = ConfigException.class)
+    @Test
     public void testInvalidDefaultRange() {
-        new ConfigDef().define("name", Type.INT, -1, Range.between(0, 10), Importance.HIGH, "docs");
+        assertThrows(ConfigException.class, () -> new ConfigDef().define("name", Type.INT, -1,
+            Range.between(0, 10), Importance.HIGH, "docs"));
     }
 
-    @Test(expected = ConfigException.class)
+    @Test
     public void testInvalidDefaultString() {
-        new ConfigDef().define("name", Type.STRING, "bad", ValidString.in("valid", "values"), Importance.HIGH, "docs");
+        assertThrows(ConfigException.class, () -> new ConfigDef().define("name", Type.STRING, "bad",
+            ValidString.in("valid", "values"), Importance.HIGH, "docs"));
     }
 
     @Test
@@ -153,8 +163,15 @@ public class ConfigDefTest {
     public void testValidators() {
         testValidators(Type.INT, Range.between(0, 10), 5, new Object[]{1, 5, 9}, new Object[]{-1, 11, null});
         testValidators(Type.STRING, ValidString.in("good", "values", "default"), "default",
-                new Object[]{"good", "values", "default"}, new Object[]{"bad", "inputs", null});
+                new Object[]{"good", "values", "default"}, new Object[]{"bad", "inputs", "DEFAULT", null});
+        testValidators(Type.STRING, CaseInsensitiveValidString.in("good", "values", "default"), "default",
+            new Object[]{"gOOd", "VALUES", "default"}, new Object[]{"Bad", "iNPUts", null});
         testValidators(Type.LIST, ConfigDef.ValidList.in("1", "2", "3"), "1", new Object[]{"1", "2", "3"}, new Object[]{"4", "5", "6"});
+        testValidators(Type.STRING, new ConfigDef.NonNullValidator(), "a", new Object[]{"abb"}, new Object[] {null});
+        testValidators(Type.STRING, ConfigDef.CompositeValidator.of(new ConfigDef.NonNullValidator(), ValidString.in("a", "b")), "a", new Object[]{"a", "b"}, new Object[] {null, -1, "c"});
+        testValidators(Type.STRING, new ConfigDef.NonEmptyStringWithoutControlChars(), "defaultname",
+                new Object[]{"test", "name", "test/test", "test\u1234", "\u1324name\\", "/+%>&):??<&()?-", "+1", "\uD83D\uDE01", "\uF3B1", "     test   \n\r", "\n  hello \t"},
+                new Object[]{"nontrailing\nnotallowed", "as\u0001cii control char", "tes\rt", "test\btest", "1\t2", ""});
     }
 
     @Test
@@ -359,6 +376,71 @@ public class ConfigDefTest {
         assertFalse(configDef.toRst().contains("my.config"));
     }
 
+    @Test
+    public void testDynamicUpdateModeInDocs() throws Exception {
+        final ConfigDef configDef = new ConfigDef()
+                .define("my.broker.config", Type.LONG, Importance.HIGH, "docs")
+                .define("my.cluster.config", Type.LONG, Importance.HIGH, "docs")
+                .define("my.readonly.config", Type.LONG, Importance.HIGH, "docs");
+        final Map<String, String> updateModes = new HashMap<>();
+        updateModes.put("my.broker.config", "per-broker");
+        updateModes.put("my.cluster.config", "cluster-wide");
+        final String html = configDef.toHtmlTable(updateModes);
+        Set<String> configsInHtml = new HashSet<>();
+        for (String line : html.split("\n")) {
+            if (line.contains("my.broker.config")) {
+                assertTrue(line.contains("per-broker"));
+                configsInHtml.add("my.broker.config");
+            } else if (line.contains("my.cluster.config")) {
+                assertTrue(line.contains("cluster-wide"));
+                configsInHtml.add("my.cluster.config");
+            } else if (line.contains("my.readonly.config")) {
+                assertTrue(line.contains("read-only"));
+                configsInHtml.add("my.readonly.config");
+            }
+        }
+        assertEquals(configDef.names(), configsInHtml);
+    }
+
+    @Test
+    public void testNames() {
+        final ConfigDef configDef = new ConfigDef()
+                .define("a", Type.STRING, Importance.LOW, "docs")
+                .define("b", Type.STRING, Importance.LOW, "docs");
+        Set<String> names = configDef.names();
+        assertEquals(new HashSet<>(Arrays.asList("a", "b")), names);
+        // should be unmodifiable
+        try {
+            names.add("new");
+            fail();
+        } catch (UnsupportedOperationException e) {
+            // expected
+        }
+    }
+
+    @Test
+    public void testMissingDependentConfigs() {
+        // Should not be possible to parse a config if a dependent config has not been defined
+        final ConfigDef configDef = new ConfigDef()
+                .define("parent", Type.STRING, Importance.HIGH, "parent docs", "group", 1, Width.LONG, "Parent", Collections.singletonList("child"));
+        assertThrows(ConfigException.class, () -> configDef.parse(Collections.emptyMap()));
+    }
+
+    @Test
+    public void testBaseConfigDefDependents() {
+        // Creating a ConfigDef based on another should compute the correct number of configs with no parent, even
+        // if the base ConfigDef has already computed its parentless configs
+        final ConfigDef baseConfigDef = new ConfigDef().define("a", Type.STRING, Importance.LOW, "docs");
+        assertEquals(new HashSet<>(Arrays.asList("a")), baseConfigDef.getConfigsWithNoParent());
+
+        final ConfigDef configDef = new ConfigDef(baseConfigDef)
+                .define("parent", Type.STRING, Importance.HIGH, "parent docs", "group", 1, Width.LONG, "Parent", Collections.singletonList("child"))
+                .define("child", Type.STRING, Importance.HIGH, "docs");
+
+        assertEquals(new HashSet<>(Arrays.asList("a", "parent")), configDef.getConfigsWithNoParent());
+    }
+
+
     private static class IntegerRecommender implements ConfigDef.Recommender {
 
         private boolean hasParent;
@@ -502,42 +584,50 @@ public class ConfigDefTest {
     @Test
     public void testConvertValueToStringBoolean() {
         assertEquals("true", ConfigDef.convertToString(true, Type.BOOLEAN));
+        assertNull(ConfigDef.convertToString(null, Type.BOOLEAN));
     }
 
     @Test
     public void testConvertValueToStringShort() {
         assertEquals("32767", ConfigDef.convertToString(Short.MAX_VALUE, Type.SHORT));
+        assertNull(ConfigDef.convertToString(null, Type.SHORT));
     }
 
     @Test
     public void testConvertValueToStringInt() {
         assertEquals("2147483647", ConfigDef.convertToString(Integer.MAX_VALUE, Type.INT));
+        assertNull(ConfigDef.convertToString(null, Type.INT));
     }
 
     @Test
     public void testConvertValueToStringLong() {
         assertEquals("9223372036854775807", ConfigDef.convertToString(Long.MAX_VALUE, Type.LONG));
+        assertNull(ConfigDef.convertToString(null, Type.LONG));
     }
 
     @Test
     public void testConvertValueToStringDouble() {
         assertEquals("3.125", ConfigDef.convertToString(3.125, Type.DOUBLE));
+        assertNull(ConfigDef.convertToString(null, Type.DOUBLE));
     }
 
     @Test
     public void testConvertValueToStringString() {
         assertEquals("foobar", ConfigDef.convertToString("foobar", Type.STRING));
+        assertNull(ConfigDef.convertToString(null, Type.STRING));
     }
 
     @Test
     public void testConvertValueToStringPassword() {
         assertEquals(Password.HIDDEN, ConfigDef.convertToString(new Password("foobar"), Type.PASSWORD));
         assertEquals("foobar", ConfigDef.convertToString("foobar", Type.PASSWORD));
+        assertNull(ConfigDef.convertToString(null, Type.PASSWORD));
     }
 
     @Test
     public void testConvertValueToStringList() {
         assertEquals("a,bc,d", ConfigDef.convertToString(Arrays.asList("a", "bc", "d"), Type.LIST));
+        assertNull(ConfigDef.convertToString(null, Type.LIST));
     }
 
     @Test
@@ -546,6 +636,7 @@ public class ConfigDefTest {
         assertEquals("org.apache.kafka.common.config.ConfigDefTest", actual);
         // Additionally validate that we can look up this class by this name
         assertEquals(ConfigDefTest.class, Class.forName(actual));
+        assertNull(ConfigDef.convertToString(null, Type.CLASS));
     }
 
     @Test
@@ -556,6 +647,68 @@ public class ConfigDefTest {
         assertEquals(NestedClass.class, Class.forName(actual));
     }
 
+    @Test
+    public void testClassWithAlias() {
+        final String alias = "PluginAlias";
+        ClassLoader originalClassLoader = Thread.currentThread().getContextClassLoader();
+        try {
+            // Could try to use the Plugins class from Connect here, but this should simulate enough
+            // of the aliasing logic to suffice for this test.
+            Thread.currentThread().setContextClassLoader(new ClassLoader(originalClassLoader) {
+                @Override
+                public Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+                    if (alias.equals(name)) {
+                        return NestedClass.class;
+                    } else {
+                        return super.loadClass(name, resolve);
+                    }
+                }
+            });
+            ConfigDef.parseType("Test config", alias, Type.CLASS);
+        } finally {
+            Thread.currentThread().setContextClassLoader(originalClassLoader);
+        }
+    }
+
     private class NestedClass {
     }
+
+    @Test
+    public void testNiceMemoryUnits() {
+        assertEquals("", ConfigDef.niceMemoryUnits(0L));
+        assertEquals("", ConfigDef.niceMemoryUnits(1023));
+        assertEquals(" (1 kibibyte)", ConfigDef.niceMemoryUnits(1024));
+        assertEquals("", ConfigDef.niceMemoryUnits(1025));
+        assertEquals(" (2 kibibytes)", ConfigDef.niceMemoryUnits(2 * 1024));
+        assertEquals(" (1 mebibyte)", ConfigDef.niceMemoryUnits(1024 * 1024));
+        assertEquals(" (2 mebibytes)", ConfigDef.niceMemoryUnits(2 * 1024 * 1024));
+        assertEquals(" (1 gibibyte)", ConfigDef.niceMemoryUnits(1024 * 1024 * 1024));
+        assertEquals(" (2 gibibytes)", ConfigDef.niceMemoryUnits(2L * 1024 * 1024 * 1024));
+        assertEquals(" (1 tebibyte)", ConfigDef.niceMemoryUnits(1024L * 1024 * 1024 * 1024));
+        assertEquals(" (2 tebibytes)", ConfigDef.niceMemoryUnits(2L * 1024 * 1024 * 1024 * 1024));
+        assertEquals(" (1024 tebibytes)", ConfigDef.niceMemoryUnits(1024L * 1024 * 1024 * 1024 * 1024));
+        assertEquals(" (2048 tebibytes)", ConfigDef.niceMemoryUnits(2L * 1024 * 1024 * 1024 * 1024 * 1024));
+    }
+
+    @Test
+    public void testNiceTimeUnits() {
+        assertEquals("", ConfigDef.niceTimeUnits(0));
+        assertEquals("", ConfigDef.niceTimeUnits(Duration.ofSeconds(1).toMillis() - 1));
+        assertEquals(" (1 second)", ConfigDef.niceTimeUnits(Duration.ofSeconds(1).toMillis()));
+        assertEquals("", ConfigDef.niceTimeUnits(Duration.ofSeconds(1).toMillis() + 1));
+        assertEquals(" (2 seconds)", ConfigDef.niceTimeUnits(Duration.ofSeconds(2).toMillis()));
+
+        assertEquals(" (1 minute)", ConfigDef.niceTimeUnits(Duration.ofMinutes(1).toMillis()));
+        assertEquals(" (2 minutes)", ConfigDef.niceTimeUnits(Duration.ofMinutes(2).toMillis()));
+
+        assertEquals(" (1 hour)", ConfigDef.niceTimeUnits(Duration.ofHours(1).toMillis()));
+        assertEquals(" (2 hours)", ConfigDef.niceTimeUnits(Duration.ofHours(2).toMillis()));
+
+        assertEquals(" (1 day)", ConfigDef.niceTimeUnits(Duration.ofDays(1).toMillis()));
+        assertEquals(" (2 days)", ConfigDef.niceTimeUnits(Duration.ofDays(2).toMillis()));
+
+        assertEquals(" (7 days)", ConfigDef.niceTimeUnits(Duration.ofDays(7).toMillis()));
+        assertEquals(" (365 days)", ConfigDef.niceTimeUnits(Duration.ofDays(365).toMillis()));
+    }
+
 }

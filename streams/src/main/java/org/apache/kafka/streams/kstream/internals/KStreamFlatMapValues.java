@@ -16,30 +16,31 @@
  */
 package org.apache.kafka.streams.kstream.internals;
 
-import org.apache.kafka.streams.kstream.ValueMapper;
-import org.apache.kafka.streams.processor.AbstractProcessor;
-import org.apache.kafka.streams.processor.Processor;
-import org.apache.kafka.streams.processor.ProcessorSupplier;
+import org.apache.kafka.streams.kstream.ValueMapperWithKey;
+import org.apache.kafka.streams.processor.api.ContextualProcessor;
+import org.apache.kafka.streams.processor.api.Processor;
+import org.apache.kafka.streams.processor.api.ProcessorSupplier;
+import org.apache.kafka.streams.processor.api.Record;
 
-class KStreamFlatMapValues<K, V, V1> implements ProcessorSupplier<K, V> {
+class KStreamFlatMapValues<KIn, VIn, VOut> implements ProcessorSupplier<KIn, VIn, KIn, VOut> {
 
-    private final ValueMapper<? super V, ? extends Iterable<? extends V1>> mapper;
+    private final ValueMapperWithKey<? super KIn, ? super VIn, ? extends Iterable<? extends VOut>> mapper;
 
-    KStreamFlatMapValues(ValueMapper<? super V, ? extends Iterable<? extends V1>> mapper) {
+    KStreamFlatMapValues(final ValueMapperWithKey<? super KIn, ? super VIn, ? extends Iterable<? extends VOut>> mapper) {
         this.mapper = mapper;
     }
 
     @Override
-    public Processor<K, V> get() {
+    public Processor<KIn, VIn, KIn, VOut> get() {
         return new KStreamFlatMapValuesProcessor();
     }
 
-    private class KStreamFlatMapValuesProcessor extends AbstractProcessor<K, V> {
+    private class KStreamFlatMapValuesProcessor extends ContextualProcessor<KIn, VIn, KIn, VOut> {
         @Override
-        public void process(K key, V value) {
-            Iterable<? extends V1> newValues = mapper.apply(value);
-            for (V1 v : newValues) {
-                context().forward(key, v);
+        public void process(final Record<KIn, VIn> record) {
+            final Iterable<? extends VOut> newValues = mapper.apply(record.key(), record.value());
+            for (final VOut v : newValues) {
+                context().forward(record.withValue(v));
             }
         }
     }

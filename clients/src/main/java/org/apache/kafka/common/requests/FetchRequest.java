@@ -16,126 +16,193 @@
  */
 package org.apache.kafka.common.requests;
 
+import org.apache.kafka.common.IsolationLevel;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.message.FetchRequestData;
+import org.apache.kafka.common.message.FetchResponseData;
 import org.apache.kafka.common.protocol.ApiKeys;
+import org.apache.kafka.common.protocol.ByteBufferAccessor;
 import org.apache.kafka.common.protocol.Errors;
-import org.apache.kafka.common.protocol.types.Struct;
-import org.apache.kafka.common.record.MemoryRecords;
+import org.apache.kafka.common.record.RecordBatch;
+import org.apache.kafka.common.utils.Utils;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.stream.Collectors;
 
 public class FetchRequest extends AbstractRequest {
+
     public static final int CONSUMER_REPLICA_ID = -1;
-    private static final String REPLICA_ID_KEY_NAME = "replica_id";
-    private static final String MAX_WAIT_KEY_NAME = "max_wait_time";
-    private static final String MIN_BYTES_KEY_NAME = "min_bytes";
-    private static final String ISOLATION_LEVEL_KEY_NAME = "isolation_level";
-    private static final String TOPICS_KEY_NAME = "topics";
-
-    // request and partition level name
-    private static final String MAX_BYTES_KEY_NAME = "max_bytes";
-
-    // topic level field names
-    private static final String TOPIC_KEY_NAME = "topic";
-    private static final String PARTITIONS_KEY_NAME = "partitions";
-
-    // partition level field names
-    private static final String PARTITION_KEY_NAME = "partition";
-    private static final String FETCH_OFFSET_KEY_NAME = "fetch_offset";
-    private static final String LOG_START_OFFSET_KEY_NAME = "log_start_offset";
 
     // default values for older versions where a request level limit did not exist
     public static final int DEFAULT_RESPONSE_MAX_BYTES = Integer.MAX_VALUE;
     public static final long INVALID_LOG_START_OFFSET = -1L;
 
-    private final int replicaId;
-    private final int maxWait;
-    private final int minBytes;
-    private final int maxBytes;
-    private final IsolationLevel isolationLevel;
-    private final LinkedHashMap<TopicPartition, PartitionData> fetchData;
+    private final FetchRequestData data;
+
+    // These are immutable read-only structures derived from FetchRequestData
+    private final Map<TopicPartition, PartitionData> fetchData;
+    private final List<TopicPartition> toForget;
+    private final FetchMetadata metadata;
 
     public static final class PartitionData {
         public final long fetchOffset;
         public final long logStartOffset;
         public final int maxBytes;
+        public final Optional<Integer> currentLeaderEpoch;
+        public final Optional<Integer> lastFetchedEpoch;
 
-        public PartitionData(long fetchOffset, long logStartOffset, int maxBytes) {
+        public PartitionData(
+            long fetchOffset,
+            long logStartOffset,
+            int maxBytes,
+            Optional<Integer> currentLeaderEpoch
+        ) {
+            this(fetchOffset, logStartOffset, maxBytes, currentLeaderEpoch, Optional.empty());
+        }
+
+        public PartitionData(
+            long fetchOffset,
+            long logStartOffset,
+            int maxBytes,
+            Optional<Integer> currentLeaderEpoch,
+            Optional<Integer> lastFetchedEpoch
+        ) {
             this.fetchOffset = fetchOffset;
             this.logStartOffset = logStartOffset;
             this.maxBytes = maxBytes;
+            this.currentLeaderEpoch = currentLeaderEpoch;
+            this.lastFetchedEpoch = lastFetchedEpoch;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            PartitionData that = (PartitionData) o;
+            return fetchOffset == that.fetchOffset &&
+                logStartOffset == that.logStartOffset &&
+                maxBytes == that.maxBytes &&
+                Objects.equals(currentLeaderEpoch, that.currentLeaderEpoch) &&
+                Objects.equals(lastFetchedEpoch, that.lastFetchedEpoch);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(fetchOffset, logStartOffset, maxBytes, currentLeaderEpoch, lastFetchedEpoch);
         }
 
         @Override
         public String toString() {
-            return "(offset=" + fetchOffset + ", logStartOffset=" + logStartOffset + ", maxBytes=" + maxBytes + ")";
+            return "PartitionData(" +
+                "fetchOffset=" + fetchOffset +
+                ", logStartOffset=" + logStartOffset +
+                ", maxBytes=" + maxBytes +
+                ", currentLeaderEpoch=" + currentLeaderEpoch +
+                ", lastFetchedEpoch=" + lastFetchedEpoch +
+                ')';
         }
     }
 
-    static final class TopicAndPartitionData<T> {
-        public final String topic;
-        public final LinkedHashMap<Integer, T> partitions;
-
-        public TopicAndPartitionData(String topic) {
-            this.topic = topic;
-            this.partitions = new LinkedHashMap<>();
+    private Optional<Integer> optionalEpoch(int rawEpochValue) {
+        if (rawEpochValue < 0) {
+            return Optional.empty();
+        } else {
+            return Optional.of(rawEpochValue);
         }
+    }
 
-        public static <T> List<TopicAndPartitionData<T>> batchByTopic(LinkedHashMap<TopicPartition, T> data) {
-            List<TopicAndPartitionData<T>> topics = new ArrayList<>();
-            for (Map.Entry<TopicPartition, T> topicEntry : data.entrySet()) {
-                String topic = topicEntry.getKey().topic();
-                int partition = topicEntry.getKey().partition();
-                T partitionData = topicEntry.getValue();
-                if (topics.isEmpty() || !topics.get(topics.size() - 1).topic.equals(topic))
-                    topics.add(new TopicAndPartitionData<T>(topic));
-                topics.get(topics.size() - 1).partitions.put(partition, partitionData);
-            }
-            return topics;
-        }
+    private Map<TopicPartition, PartitionData> toPartitionDataMap(List<FetchRequestData.FetchTopic> fetchableTopics) {
+        Map<TopicPartition, PartitionData> result = new LinkedHashMap<>();
+        fetchableTopics.forEach(fetchTopic -> fetchTopic.partitions().forEach(fetchPartition -> {
+            result.put(new TopicPartition(fetchTopic.topic(), fetchPartition.partition()),
+                new PartitionData(
+                    fetchPartition.fetchOffset(),
+                    fetchPartition.logStartOffset(),
+                    fetchPartition.partitionMaxBytes(),
+                    optionalEpoch(fetchPartition.currentLeaderEpoch()),
+                    optionalEpoch(fetchPartition.lastFetchedEpoch())
+                ));
+        }));
+        return Collections.unmodifiableMap(result);
+    }
+
+    private List<TopicPartition> toForgottenTopicList(List<FetchRequestData.ForgottenTopic> forgottenTopics) {
+        List<TopicPartition> result = new ArrayList<>();
+        forgottenTopics.forEach(forgottenTopic ->
+            forgottenTopic.partitions().forEach(partitionId ->
+                result.add(new TopicPartition(forgottenTopic.topic(), partitionId))
+            )
+        );
+        return result;
     }
 
     public static class Builder extends AbstractRequest.Builder<FetchRequest> {
         private final int maxWait;
         private final int minBytes;
         private final int replicaId;
-        private final LinkedHashMap<TopicPartition, PartitionData> fetchData;
-        private final IsolationLevel isolationLevel;
+        private final Map<TopicPartition, PartitionData> fetchData;
+        private IsolationLevel isolationLevel = IsolationLevel.READ_UNCOMMITTED;
         private int maxBytes = DEFAULT_RESPONSE_MAX_BYTES;
+        private FetchMetadata metadata = FetchMetadata.LEGACY;
+        private List<TopicPartition> toForget = Collections.emptyList();
+        private String rackId = "";
 
-        public static Builder forConsumer(int maxWait, int minBytes, LinkedHashMap<TopicPartition, PartitionData> fetchData) {
-            return new Builder(null, CONSUMER_REPLICA_ID, maxWait, minBytes, fetchData, IsolationLevel.READ_UNCOMMITTED);
+        public static Builder forConsumer(int maxWait, int minBytes, Map<TopicPartition, PartitionData> fetchData) {
+            return new Builder(ApiKeys.FETCH.oldestVersion(), ApiKeys.FETCH.latestVersion(),
+                CONSUMER_REPLICA_ID, maxWait, minBytes, fetchData);
         }
 
-        public static Builder forConsumer(int maxWait, int minBytes, LinkedHashMap<TopicPartition, PartitionData> fetchData, IsolationLevel isolationLevel) {
-            return new Builder(null, CONSUMER_REPLICA_ID, maxWait, minBytes, fetchData, isolationLevel);
+        public static Builder forReplica(short allowedVersion, int replicaId, int maxWait, int minBytes,
+                                         Map<TopicPartition, PartitionData> fetchData) {
+            return new Builder(allowedVersion, allowedVersion, replicaId, maxWait, minBytes, fetchData);
         }
 
-        public static Builder forReplica(short desiredVersion, int replicaId, int maxWait, int minBytes,
-                                         LinkedHashMap<TopicPartition, PartitionData> fetchData) {
-            return new Builder(desiredVersion, replicaId, maxWait, minBytes, fetchData, IsolationLevel.READ_UNCOMMITTED);
-        }
-
-        private Builder(Short desiredVersion, int replicaId, int maxWait, int minBytes,
-                        LinkedHashMap<TopicPartition, PartitionData> fetchData, IsolationLevel isolationLevel) {
-            super(ApiKeys.FETCH, desiredVersion);
+        public Builder(short minVersion, short maxVersion, int replicaId, int maxWait, int minBytes,
+                        Map<TopicPartition, PartitionData> fetchData) {
+            super(ApiKeys.FETCH, minVersion, maxVersion);
             this.replicaId = replicaId;
             this.maxWait = maxWait;
             this.minBytes = minBytes;
             this.fetchData = fetchData;
-            this.isolationLevel = isolationLevel;
         }
 
-        public LinkedHashMap<TopicPartition, PartitionData> fetchData() {
+        public Builder isolationLevel(IsolationLevel isolationLevel) {
+            this.isolationLevel = isolationLevel;
+            return this;
+        }
+
+        public Builder metadata(FetchMetadata metadata) {
+            this.metadata = metadata;
+            return this;
+        }
+
+        public Builder rackId(String rackId) {
+            this.rackId = rackId;
+            return this;
+        }
+
+        public Map<TopicPartition, PartitionData> fetchData() {
             return this.fetchData;
         }
 
         public Builder setMaxBytes(int maxBytes) {
             this.maxBytes = maxBytes;
+            return this;
+        }
+
+        public List<TopicPartition> toForget() {
+            return toForget;
+        }
+
+        public Builder toForget(List<TopicPartition> toForget) {
+            this.toForget = toForget;
             return this;
         }
 
@@ -145,148 +212,143 @@ public class FetchRequest extends AbstractRequest {
                 maxBytes = DEFAULT_RESPONSE_MAX_BYTES;
             }
 
-            return new FetchRequest(version, replicaId, maxWait, minBytes, maxBytes, fetchData, isolationLevel);
+            FetchRequestData fetchRequestData = new FetchRequestData();
+            fetchRequestData.setReplicaId(replicaId);
+            fetchRequestData.setMaxWaitMs(maxWait);
+            fetchRequestData.setMinBytes(minBytes);
+            fetchRequestData.setMaxBytes(maxBytes);
+            fetchRequestData.setIsolationLevel(isolationLevel.id());
+            fetchRequestData.setForgottenTopicsData(new ArrayList<>());
+            toForget.stream()
+                .collect(Collectors.groupingBy(TopicPartition::topic, LinkedHashMap::new, Collectors.toList()))
+                .forEach((topic, partitions) ->
+                    fetchRequestData.forgottenTopicsData().add(new FetchRequestData.ForgottenTopic()
+                        .setTopic(topic)
+                        .setPartitions(partitions.stream().map(TopicPartition::partition).collect(Collectors.toList())))
+                );
+            fetchRequestData.setTopics(new ArrayList<>());
+
+            // We collect the partitions in a single FetchTopic only if they appear sequentially in the fetchData
+            FetchRequestData.FetchTopic fetchTopic = null;
+            for (Map.Entry<TopicPartition, PartitionData> entry : fetchData.entrySet()) {
+                TopicPartition topicPartition = entry.getKey();
+                PartitionData partitionData = entry.getValue();
+
+                if (fetchTopic == null || !topicPartition.topic().equals(fetchTopic.topic())) {
+                    fetchTopic = new FetchRequestData.FetchTopic()
+                       .setTopic(topicPartition.topic())
+                       .setPartitions(new ArrayList<>());
+                    fetchRequestData.topics().add(fetchTopic);
+                }
+
+                FetchRequestData.FetchPartition fetchPartition = new FetchRequestData.FetchPartition()
+                    .setPartition(topicPartition.partition())
+                    .setCurrentLeaderEpoch(partitionData.currentLeaderEpoch.orElse(RecordBatch.NO_PARTITION_LEADER_EPOCH))
+                    .setLastFetchedEpoch(partitionData.lastFetchedEpoch.orElse(RecordBatch.NO_PARTITION_LEADER_EPOCH))
+                    .setFetchOffset(partitionData.fetchOffset)
+                    .setLogStartOffset(partitionData.logStartOffset)
+                    .setPartitionMaxBytes(partitionData.maxBytes);
+
+                fetchTopic.partitions().add(fetchPartition);
+            }
+
+            if (metadata != null) {
+                fetchRequestData.setSessionEpoch(metadata.epoch());
+                fetchRequestData.setSessionId(metadata.sessionId());
+            }
+            fetchRequestData.setRackId(rackId);
+
+            return new FetchRequest(fetchRequestData, version);
         }
 
         @Override
         public String toString() {
             StringBuilder bld = new StringBuilder();
-            bld.append("(type:FetchRequest").
+            bld.append("(type=FetchRequest").
                     append(", replicaId=").append(replicaId).
                     append(", maxWait=").append(maxWait).
                     append(", minBytes=").append(minBytes).
                     append(", maxBytes=").append(maxBytes).
                     append(", fetchData=").append(fetchData).
+                    append(", isolationLevel=").append(isolationLevel).
+                    append(", toForget=").append(Utils.join(toForget, ", ")).
+                    append(", metadata=").append(metadata).
+                    append(", rackId=").append(rackId).
                     append(")");
             return bld.toString();
         }
     }
 
-    private FetchRequest(short version, int replicaId, int maxWait, int minBytes, int maxBytes,
-                         LinkedHashMap<TopicPartition, PartitionData> fetchData) {
-        this(version, replicaId, maxWait, minBytes, maxBytes, fetchData, IsolationLevel.READ_UNCOMMITTED);
-    }
-
-    private FetchRequest(short version, int replicaId, int maxWait, int minBytes, int maxBytes,
-                         LinkedHashMap<TopicPartition, PartitionData> fetchData, IsolationLevel isolationLevel) {
-        super(version);
-        this.replicaId = replicaId;
-        this.maxWait = maxWait;
-        this.minBytes = minBytes;
-        this.maxBytes = maxBytes;
-        this.fetchData = fetchData;
-        this.isolationLevel = isolationLevel;
-    }
-
-    public FetchRequest(Struct struct, short version) {
-        super(version);
-        replicaId = struct.getInt(REPLICA_ID_KEY_NAME);
-        maxWait = struct.getInt(MAX_WAIT_KEY_NAME);
-        minBytes = struct.getInt(MIN_BYTES_KEY_NAME);
-        if (struct.hasField(MAX_BYTES_KEY_NAME))
-            maxBytes = struct.getInt(MAX_BYTES_KEY_NAME);
-        else
-            maxBytes = DEFAULT_RESPONSE_MAX_BYTES;
-
-        if (struct.hasField(ISOLATION_LEVEL_KEY_NAME))
-            isolationLevel = IsolationLevel.forId(struct.getByte(ISOLATION_LEVEL_KEY_NAME));
-        else
-            isolationLevel = IsolationLevel.READ_UNCOMMITTED;
-
-        fetchData = new LinkedHashMap<>();
-        for (Object topicResponseObj : struct.getArray(TOPICS_KEY_NAME)) {
-            Struct topicResponse = (Struct) topicResponseObj;
-            String topic = topicResponse.getString(TOPIC_KEY_NAME);
-            for (Object partitionResponseObj : topicResponse.getArray(PARTITIONS_KEY_NAME)) {
-                Struct partitionResponse = (Struct) partitionResponseObj;
-                int partition = partitionResponse.getInt(PARTITION_KEY_NAME);
-                long offset = partitionResponse.getLong(FETCH_OFFSET_KEY_NAME);
-                int maxBytes = partitionResponse.getInt(MAX_BYTES_KEY_NAME);
-                long logStartOffset = partitionResponse.hasField(LOG_START_OFFSET_KEY_NAME) ?
-                    partitionResponse.getLong(LOG_START_OFFSET_KEY_NAME) : INVALID_LOG_START_OFFSET;
-                PartitionData partitionData = new PartitionData(offset, logStartOffset, maxBytes);
-                fetchData.put(new TopicPartition(topic, partition), partitionData);
-            }
-        }
+    public FetchRequest(FetchRequestData fetchRequestData, short version) {
+        super(ApiKeys.FETCH, version);
+        this.data = fetchRequestData;
+        this.fetchData = toPartitionDataMap(fetchRequestData.topics());
+        this.toForget = toForgottenTopicList(fetchRequestData.forgottenTopicsData());
+        this.metadata = new FetchMetadata(fetchRequestData.sessionId(), fetchRequestData.sessionEpoch());
     }
 
     @Override
     public AbstractResponse getErrorResponse(int throttleTimeMs, Throwable e) {
-        LinkedHashMap<TopicPartition, FetchResponse.PartitionData> responseData = new LinkedHashMap<>();
-
-        for (Map.Entry<TopicPartition, PartitionData> entry: fetchData.entrySet()) {
-            FetchResponse.PartitionData partitionResponse = new FetchResponse.PartitionData(Errors.forException(e),
-                FetchResponse.INVALID_HIGHWATERMARK, FetchResponse.INVALID_LAST_STABLE_OFFSET, FetchResponse.INVALID_LOG_START_OFFSET,
-                null, MemoryRecords.EMPTY);
-            responseData.put(entry.getKey(), partitionResponse);
+        // The error is indicated in two ways: by setting the same error code in all partitions, and by
+        // setting the top-level error code.  The form where we set the same error code in all partitions
+        // is needed in order to maintain backwards compatibility with older versions of the protocol
+        // in which there was no top-level error code. Note that for incremental fetch responses, there
+        // may not be any partitions at all in the response.  For this reason, the top-level error code
+        // is essential for them.
+        Errors error = Errors.forException(e);
+        LinkedHashMap<TopicPartition, FetchResponseData.PartitionData> responseData = new LinkedHashMap<>();
+        for (Map.Entry<TopicPartition, PartitionData> entry : fetchData.entrySet()) {
+            responseData.put(entry.getKey(), FetchResponse.partitionResponse(entry.getKey().partition(), error));
         }
-        return new FetchResponse(responseData, throttleTimeMs);
+        return FetchResponse.of(error, throttleTimeMs, data.sessionId(), responseData);
     }
 
     public int replicaId() {
-        return replicaId;
+        return data.replicaId();
     }
 
     public int maxWait() {
-        return maxWait;
+        return data.maxWaitMs();
     }
 
     public int minBytes() {
-        return minBytes;
+        return data.minBytes();
     }
 
     public int maxBytes() {
-        return maxBytes;
+        return data.maxBytes();
     }
 
     public Map<TopicPartition, PartitionData> fetchData() {
         return fetchData;
     }
 
+    public List<TopicPartition> toForget() {
+        return toForget;
+    }
+
     public boolean isFromFollower() {
-        return replicaId >= 0;
+        return replicaId() >= 0;
     }
 
     public IsolationLevel isolationLevel() {
-        return isolationLevel;
+        return IsolationLevel.forId(data.isolationLevel());
+    }
+
+    public FetchMetadata metadata() {
+        return metadata;
+    }
+
+    public String rackId() {
+        return data.rackId();
     }
 
     public static FetchRequest parse(ByteBuffer buffer, short version) {
-        return new FetchRequest(ApiKeys.FETCH.parseRequest(version, buffer), version);
+        return new FetchRequest(new FetchRequestData(new ByteBufferAccessor(buffer), version), version);
     }
 
     @Override
-    protected Struct toStruct() {
-        Struct struct = new Struct(ApiKeys.FETCH.requestSchema(version()));
-        List<TopicAndPartitionData<PartitionData>> topicsData = TopicAndPartitionData.batchByTopic(fetchData);
-
-        struct.set(REPLICA_ID_KEY_NAME, replicaId);
-        struct.set(MAX_WAIT_KEY_NAME, maxWait);
-        struct.set(MIN_BYTES_KEY_NAME, minBytes);
-        if (struct.hasField(MAX_BYTES_KEY_NAME))
-            struct.set(MAX_BYTES_KEY_NAME, maxBytes);
-        if (struct.hasField(ISOLATION_LEVEL_KEY_NAME))
-            struct.set(ISOLATION_LEVEL_KEY_NAME, isolationLevel.id());
-
-        List<Struct> topicArray = new ArrayList<>();
-        for (TopicAndPartitionData<PartitionData> topicEntry : topicsData) {
-            Struct topicData = struct.instance(TOPICS_KEY_NAME);
-            topicData.set(TOPIC_KEY_NAME, topicEntry.topic);
-            List<Struct> partitionArray = new ArrayList<>();
-            for (Map.Entry<Integer, PartitionData> partitionEntry : topicEntry.partitions.entrySet()) {
-                PartitionData fetchPartitionData = partitionEntry.getValue();
-                Struct partitionData = topicData.instance(PARTITIONS_KEY_NAME);
-                partitionData.set(PARTITION_KEY_NAME, partitionEntry.getKey());
-                partitionData.set(FETCH_OFFSET_KEY_NAME, fetchPartitionData.fetchOffset);
-                if (partitionData.hasField(LOG_START_OFFSET_KEY_NAME))
-                    partitionData.set(LOG_START_OFFSET_KEY_NAME, fetchPartitionData.logStartOffset);
-                partitionData.set(MAX_BYTES_KEY_NAME, fetchPartitionData.maxBytes);
-                partitionArray.add(partitionData);
-            }
-            topicData.set(PARTITIONS_KEY_NAME, partitionArray.toArray());
-            topicArray.add(topicData);
-        }
-        struct.set(TOPICS_KEY_NAME, topicArray.toArray());
-        return struct;
+    public FetchRequestData data() {
+        return data;
     }
 }

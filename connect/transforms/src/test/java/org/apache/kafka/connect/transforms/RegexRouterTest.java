@@ -17,12 +17,12 @@
 package org.apache.kafka.connect.transforms;
 
 import org.apache.kafka.connect.sink.SinkRecord;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
 import java.util.Map;
 
-import static org.junit.Assert.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 public class RegexRouterTest {
 
@@ -32,8 +32,9 @@ public class RegexRouterTest {
         props.put("replacement", replacement);
         final RegexRouter<SinkRecord> router = new RegexRouter<>();
         router.configure(props);
-        return router.apply(new SinkRecord(topic, 0, null, null, null, null, 0))
-                .topic();
+        String sinkTopic = router.apply(new SinkRecord(topic, 0, null, null, null, null, 0)).topic();
+        router.close();
+        return sinkTopic;
     }
 
     @Test

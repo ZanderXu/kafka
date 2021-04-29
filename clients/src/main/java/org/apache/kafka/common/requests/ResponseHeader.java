@@ -16,48 +16,74 @@
  */
 package org.apache.kafka.common.requests;
 
-import static org.apache.kafka.common.protocol.Protocol.RESPONSE_HEADER;
+import org.apache.kafka.common.message.ResponseHeaderData;
+import org.apache.kafka.common.protocol.ByteBufferAccessor;
+import org.apache.kafka.common.protocol.ObjectSerializationCache;
 
 import java.nio.ByteBuffer;
-
-import org.apache.kafka.common.protocol.Protocol;
-import org.apache.kafka.common.protocol.types.Field;
-import org.apache.kafka.common.protocol.types.Struct;
-
+import java.util.Objects;
 
 /**
  * A response header in the kafka protocol.
  */
-public class ResponseHeader extends AbstractRequestResponse {
+public class ResponseHeader implements AbstractRequestResponse {
+    private final ResponseHeaderData data;
+    private final short headerVersion;
 
-    private static final Field CORRELATION_KEY_FIELD = RESPONSE_HEADER.get("correlation_id");
-
-    private final int correlationId;
-
-    public ResponseHeader(Struct struct) {
-        correlationId = struct.getInt(CORRELATION_KEY_FIELD);
+    public ResponseHeader(int correlationId, short headerVersion) {
+        this(new ResponseHeaderData().setCorrelationId(correlationId), headerVersion);
     }
 
-    public ResponseHeader(int correlationId) {
-        this.correlationId = correlationId;
+    public ResponseHeader(ResponseHeaderData data, short headerVersion) {
+        this.data = data;
+        this.headerVersion = headerVersion;
     }
 
-    public int sizeOf() {
-        return toStruct().sizeOf();
-    }
-
-    public Struct toStruct() {
-        Struct struct = new Struct(Protocol.RESPONSE_HEADER);
-        struct.set(CORRELATION_KEY_FIELD, correlationId);
-        return struct;
+    public int size(ObjectSerializationCache serializationCache) {
+        return data().size(serializationCache, headerVersion);
     }
 
     public int correlationId() {
-        return correlationId;
+        return this.data.correlationId();
     }
 
-    public static ResponseHeader parse(ByteBuffer buffer) {
-        return new ResponseHeader(Protocol.RESPONSE_HEADER.read(buffer));
+    public short headerVersion() {
+        return headerVersion;
     }
 
+    public ResponseHeaderData data() {
+        return data;
+    }
+
+    public void write(ByteBuffer buffer, ObjectSerializationCache serializationCache) {
+        data.write(new ByteBufferAccessor(buffer), serializationCache, headerVersion);
+    }
+
+    @Override
+    public String toString() {
+        return "ResponseHeader("
+            + "correlationId=" + data.correlationId()
+            + ", headerVersion=" + headerVersion
+            + ")";
+    }
+
+    public static ResponseHeader parse(ByteBuffer buffer, short headerVersion) {
+        return new ResponseHeader(
+            new ResponseHeaderData(new ByteBufferAccessor(buffer), headerVersion),
+                headerVersion);
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        ResponseHeader that = (ResponseHeader) o;
+        return headerVersion == that.headerVersion &&
+            Objects.equals(data, that.data);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(data, headerVersion);
+    }
 }

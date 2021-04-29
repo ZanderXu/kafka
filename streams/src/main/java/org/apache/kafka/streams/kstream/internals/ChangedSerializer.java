@@ -16,19 +16,20 @@
  */
 package org.apache.kafka.streams.kstream.internals;
 
+import org.apache.kafka.common.header.Headers;
 import org.apache.kafka.common.serialization.Serializer;
 import org.apache.kafka.streams.errors.StreamsException;
 
 import java.nio.ByteBuffer;
-import java.util.Map;
+import java.util.Objects;
 
-public class ChangedSerializer<T> implements Serializer<Change<T>> {
+public class ChangedSerializer<T> implements Serializer<Change<T>>, WrappingNullableSerializer<Change<T>, Void, T> {
 
     private static final int NEWFLAG_SIZE = 1;
 
     private Serializer<T> inner;
 
-    public ChangedSerializer(Serializer<T> inner) {
+    public ChangedSerializer(final Serializer<T> inner) {
         this.inner = inner;
     }
 
@@ -36,13 +37,11 @@ public class ChangedSerializer<T> implements Serializer<Change<T>> {
         return inner;
     }
 
-    public void setInner(Serializer<T> inner) {
-        this.inner = inner;
-    }
-
     @Override
-    public void configure(Map<String, ?> configs, boolean isKey) {
-        // do nothing
+    public void setIfUnset(final Serializer<Void> defaultKeySerializer, final Serializer<T> defaultValueSerializer) {
+        if (inner == null) {
+            inner = Objects.requireNonNull(defaultValueSerializer);
+        }
     }
 
     /**
@@ -50,30 +49,36 @@ public class ChangedSerializer<T> implements Serializer<Change<T>> {
      * both values are not null
      */
     @Override
-    public byte[] serialize(String topic, Change<T> data) {
-        byte[] serializedKey;
+    public byte[] serialize(final String topic, final Headers headers, final Change<T> data) {
+        final byte[] serializedKey;
 
         // only one of the old / new values would be not null
         if (data.newValue != null) {
-            if (data.oldValue != null)
+            if (data.oldValue != null) {
                 throw new StreamsException("Both old and new values are not null (" + data.oldValue
-                        + " : " + data.newValue + ") in ChangeSerializer, which is not allowed.");
+                    + " : " + data.newValue + ") in ChangeSerializer, which is not allowed.");
+            }
 
-            serializedKey = inner.serialize(topic, data.newValue);
+            serializedKey = inner.serialize(topic, headers, data.newValue);
         } else {
-            if (data.oldValue == null)
+            if (data.oldValue == null) {
                 throw new StreamsException("Both old and new values are null in ChangeSerializer, which is not allowed.");
+            }
 
-            serializedKey = inner.serialize(topic, data.oldValue);
+            serializedKey = inner.serialize(topic, headers, data.oldValue);
         }
 
-        ByteBuffer buf = ByteBuffer.allocate(serializedKey.length + NEWFLAG_SIZE);
+        final ByteBuffer buf = ByteBuffer.allocate(serializedKey.length + NEWFLAG_SIZE);
         buf.put(serializedKey);
         buf.put((byte) (data.newValue != null ? 1 : 0));
 
         return buf.array();
     }
 
+    @Override
+    public byte[] serialize(final String topic, final Change<T> data) {
+        return serialize(topic, null, data);
+    }
 
     @Override
     public void close() {

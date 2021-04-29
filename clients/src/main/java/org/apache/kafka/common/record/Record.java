@@ -38,7 +38,7 @@ public interface Record {
      * Get the sequence number assigned by the producer.
      * @return the sequence number
      */
-    long sequence();
+    int sequence();
 
     /**
      * Get the size in bytes of this record.
@@ -51,19 +51,6 @@ public interface Record {
      * @return the record's timestamp
      */
     long timestamp();
-
-    /**
-     * Get a checksum of the record contents.
-     * @return A 4-byte unsigned checksum represented as a long or null if the message format does not
-     *         include a checksum (i.e. for v2 and above)
-     */
-    Long checksumOrNull();
-
-    /**
-     * Check whether the record has a valid checksum.
-     * @return true if the record has a valid checksum, false otherwise
-     */
-    boolean isValid();
 
     /**
      * Raise a {@link org.apache.kafka.common.errors.CorruptRecordException} if the record does not have a valid checksum.

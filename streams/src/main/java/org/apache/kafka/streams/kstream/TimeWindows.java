@@ -16,12 +16,16 @@
  */
 package org.apache.kafka.streams.kstream;
 
-import org.apache.kafka.common.annotation.InterfaceStability;
 import org.apache.kafka.streams.kstream.internals.TimeWindow;
 import org.apache.kafka.streams.processor.TimestampExtractor;
 
-import java.util.HashMap;
+import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Objects;
+
+import static org.apache.kafka.streams.internals.ApiUtils.prepareMillisCheckFailMsgPrefix;
+import static org.apache.kafka.streams.internals.ApiUtils.validateMillisecondDuration;
 
 /**
  * The fixed-size time-based window specifications used for aggregations.
@@ -46,29 +50,28 @@ import java.util.Map;
  * @see SessionWindows
  * @see UnlimitedWindows
  * @see JoinWindows
- * @see KGroupedStream#count(Windows, String)
- * @see KGroupedStream#count(Windows, org.apache.kafka.streams.processor.StateStoreSupplier)
- * @see KGroupedStream#reduce(Reducer, Windows, String)
- * @see KGroupedStream#reduce(Reducer, Windows, org.apache.kafka.streams.processor.StateStoreSupplier)
- * @see KGroupedStream#aggregate(Initializer, Aggregator, Windows, org.apache.kafka.common.serialization.Serde, String)
- * @see KGroupedStream#aggregate(Initializer, Aggregator, Windows, org.apache.kafka.streams.processor.StateStoreSupplier)
+ * @see KGroupedStream#windowedBy(Windows)
  * @see TimestampExtractor
  */
-@InterfaceStability.Unstable
 public final class TimeWindows extends Windows<TimeWindow> {
 
     /** The size of the windows in milliseconds. */
+    @SuppressWarnings("WeakerAccess")
     public final long sizeMs;
 
     /**
      * The size of the window's advance interval in milliseconds, i.e., by how much a window moves forward relative to
      * the previous one.
      */
+    @SuppressWarnings("WeakerAccess")
     public final long advanceMs;
 
-    private TimeWindows(final long sizeMs, final long advanceMs) {
+    private final long graceMs;
+
+    private TimeWindows(final long sizeMs, final long advanceMs, final long graceMs) {
         this.sizeMs = sizeMs;
         this.advanceMs = advanceMs;
+        this.graceMs = graceMs;
     }
 
     /**
@@ -79,15 +82,17 @@ public final class TimeWindows extends Windows<TimeWindow> {
      * This provides the semantics of tumbling windows, which are fixed-sized, gap-less, non-overlapping windows.
      * Tumbling windows are a special case of hopping windows with {@code advance == size}.
      *
-     * @param sizeMs The size of the window in milliseconds
+     * @param size The size of the window
      * @return a new window definition with default maintain duration of 1 day
-     * @throws IllegalArgumentException if the specified window size is zero or negative
+     * @throws IllegalArgumentException if the specified window size is zero or negative or can't be represented as {@code long milliseconds}
      */
-    public static TimeWindows of(final long sizeMs) throws IllegalArgumentException {
+    public static TimeWindows of(final Duration size) throws IllegalArgumentException {
+        final String msgPrefix = prepareMillisCheckFailMsgPrefix(size, "size");
+        final long sizeMs = validateMillisecondDuration(size, msgPrefix);
         if (sizeMs <= 0) {
             throw new IllegalArgumentException("Window size (sizeMs) must be larger than zero.");
         }
-        return new TimeWindows(sizeMs, sizeMs);
+        return new TimeWindows(sizeMs, sizeMs, DEFAULT_GRACE_PERIOD_MS);
     }
 
     /**
@@ -97,22 +102,24 @@ public final class TimeWindows extends Windows<TimeWindow> {
      * <p>
      * This provides the semantics of hopping windows, which are fixed-sized, overlapping windows.
      *
-     * @param advanceMs The advance interval ("hop") in milliseconds of the window, with the requirement that
-     *                  {@code 0 < advanceMs &le; sizeMs}.
+     * @param advance The advance interval ("hop") of the window, with the requirement that {@code 0 < advance.toMillis() <= sizeMs}.
      * @return a new window definition with default maintain duration of 1 day
-     * @throws IllegalArgumentException if the advance interval is negative, zero, or larger-or-equal the window size
+     * @throws IllegalArgumentException if the advance interval is negative, zero, or larger than the window size
      */
-    public TimeWindows advanceBy(final long advanceMs) {
+    public TimeWindows advanceBy(final Duration advance) {
+        final String msgPrefix = prepareMillisCheckFailMsgPrefix(advance, "advance");
+        final long advanceMs = validateMillisecondDuration(advance, msgPrefix);
         if (advanceMs <= 0 || advanceMs > sizeMs) {
-            throw new IllegalArgumentException(String.format("AdvanceMs must lie within interval (0, %d].", sizeMs));
+            throw new IllegalArgumentException(String.format("Window advancement interval should be more than zero " +
+                    "and less than window duration which is %d ms, but given advancement interval is: %d ms", sizeMs, advanceMs));
         }
-        return new TimeWindows(sizeMs, advanceMs);
+        return new TimeWindows(sizeMs, advanceMs, graceMs);
     }
 
     @Override
     public Map<Long, TimeWindow> windowsFor(final long timestamp) {
         long windowStart = (Math.max(0, timestamp - sizeMs + advanceMs) / advanceMs) * advanceMs;
-        final Map<Long, TimeWindow> windows = new HashMap<>();
+        final Map<Long, TimeWindow> windows = new LinkedHashMap<>();
         while (windowStart <= timestamp) {
             final TimeWindow window = new TimeWindow(windowStart, windowStart + sizeMs);
             windows.put(windowStart, window);
@@ -127,48 +134,55 @@ public final class TimeWindows extends Windows<TimeWindow> {
     }
 
     /**
-     * @param durationMs the window retention time
-     * @return itself
-     * @throws IllegalArgumentException if {@code duration} is smaller than the window size
+     * Reject out-of-order events that arrive more than {@code millisAfterWindowEnd}
+     * after the end of its window.
+     * <p>
+     * Delay is defined as (stream_time - record_timestamp).
+     *
+     * @param afterWindowEnd The grace period to admit out-of-order events to a window.
+     * @return this updated builder
+     * @throws IllegalArgumentException if {@code afterWindowEnd} is negative or can't be represented as {@code long milliseconds}
      */
-    @Override
-    public TimeWindows until(final long durationMs) throws IllegalArgumentException {
-        if (durationMs < sizeMs) {
-            throw new IllegalArgumentException("Window retention time (durationMs) cannot be smaller than the window size.");
+    public TimeWindows grace(final Duration afterWindowEnd) throws IllegalArgumentException {
+        final String msgPrefix = prepareMillisCheckFailMsgPrefix(afterWindowEnd, "afterWindowEnd");
+        final long afterWindowEndMs = validateMillisecondDuration(afterWindowEnd, msgPrefix);
+        if (afterWindowEndMs < 0) {
+            throw new IllegalArgumentException("Grace period must not be negative.");
         }
-        super.until(durationMs);
-        return this;
+
+        return new TimeWindows(sizeMs, advanceMs, afterWindowEndMs);
     }
 
-    /**
-     * {@inheritDoc}
-     * <p>
-     * For {@code TimeWindows} the maintain duration is at least as small as the window size.
-     *
-     * @return the window maintain duration
-     */
     @Override
-    public long maintainMs() {
-        return Math.max(super.maintainMs(), sizeMs);
+    public long gracePeriodMs() {
+        return graceMs;
     }
 
     @Override
     public boolean equals(final Object o) {
-        if (o == this) {
+        if (this == o) {
             return true;
         }
-        if (!(o instanceof TimeWindows)) {
+        if (o == null || getClass() != o.getClass()) {
             return false;
         }
-        final TimeWindows other = (TimeWindows) o;
-        return sizeMs == other.sizeMs && advanceMs == other.advanceMs;
+        final TimeWindows that = (TimeWindows) o;
+        return sizeMs == that.sizeMs &&
+            advanceMs == that.advanceMs &&
+            graceMs == that.graceMs;
     }
 
     @Override
     public int hashCode() {
-        int result = (int) (sizeMs ^ (sizeMs >>> 32));
-        result = 31 * result + (int) (advanceMs ^ (advanceMs >>> 32));
-        return result;
+        return Objects.hash(sizeMs, advanceMs, graceMs);
     }
 
+    @Override
+    public String toString() {
+        return "TimeWindows{" +
+            ", sizeMs=" + sizeMs +
+            ", advanceMs=" + advanceMs +
+            ", graceMs=" + graceMs +
+            '}';
+    }
 }

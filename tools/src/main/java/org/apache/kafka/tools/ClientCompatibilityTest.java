@@ -20,6 +20,11 @@ import net.sourceforge.argparse4j.ArgumentParsers;
 import net.sourceforge.argparse4j.inf.ArgumentParser;
 import net.sourceforge.argparse4j.inf.ArgumentParserException;
 import net.sourceforge.argparse4j.inf.Namespace;
+import org.apache.kafka.clients.admin.Admin;
+import org.apache.kafka.clients.admin.AdminClientConfig;
+import org.apache.kafka.clients.admin.Config;
+import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.clients.admin.TopicListing;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
@@ -31,9 +36,15 @@ import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.ClusterResource;
 import org.apache.kafka.common.ClusterResourceListener;
+import org.apache.kafka.common.KafkaException;
+import org.apache.kafka.common.Node;
 import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.acl.AclBindingFilter;
+import org.apache.kafka.common.config.ConfigResource;
 import org.apache.kafka.common.errors.RecordTooLargeException;
+import org.apache.kafka.common.errors.SecurityDisabledException;
+import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
 import org.apache.kafka.common.errors.UnsupportedVersionException;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.Deserializer;
@@ -43,7 +54,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.ByteBuffer;
+import java.time.Duration;
 import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedList;
@@ -51,6 +65,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Properties;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 
 import static net.sourceforge.argparse4j.impl.Arguments.store;
@@ -69,6 +84,10 @@ public class ClientCompatibilityTest {
         final boolean offsetsForTimesSupported;
         final boolean expectClusterId;
         final boolean expectRecordTooLargeException;
+        final int numClusterNodes;
+        final boolean createTopicsSupported;
+        final boolean describeAclsSupported;
+        final boolean describeConfigsSupported;
 
         TestConfig(Namespace res) {
             this.bootstrapServer = res.getString("bootstrapServer");
@@ -76,6 +95,10 @@ public class ClientCompatibilityTest {
             this.offsetsForTimesSupported = res.getBoolean("offsetsForTimesSupported");
             this.expectClusterId = res.getBoolean("clusterIdSupported");
             this.expectRecordTooLargeException = res.getBoolean("expectRecordTooLargeException");
+            this.numClusterNodes = res.getInt("numClusterNodes");
+            this.createTopicsSupported = res.getBoolean("createTopicsSupported");
+            this.describeAclsSupported = res.getBoolean("describeAclsSupported");
+            this.describeConfigsSupported = res.getBoolean("describeConfigsSupported");
         }
     }
 
@@ -121,6 +144,35 @@ public class ClientCompatibilityTest {
             .help("True if we should expect a RecordTooLargeException when trying to read from a topic " +
                   "that contains a message that is bigger than " + ConsumerConfig.MAX_PARTITION_FETCH_BYTES_CONFIG +
                   ".  This is pre-KIP-74 behavior.");
+        parser.addArgument("--num-cluster-nodes")
+            .action(store())
+            .required(true)
+            .type(Integer.class)
+            .dest("numClusterNodes")
+            .metavar("NUM_CLUSTER_NODES")
+            .help("The number of cluster nodes we should expect to see from the AdminClient.");
+        parser.addArgument("--create-topics-supported")
+            .action(store())
+            .required(true)
+            .type(Boolean.class)
+            .dest("createTopicsSupported")
+            .metavar("CREATE_TOPICS_SUPPORTED")
+            .help("Whether we should be able to create topics via the AdminClient.");
+        parser.addArgument("--describe-acls-supported")
+            .action(store())
+            .required(true)
+            .type(Boolean.class)
+            .dest("describeAclsSupported")
+            .metavar("DESCRIBE_ACLS_SUPPORTED")
+            .help("Whether describeAcls is supported in the AdminClient.");
+        parser.addArgument("--describe-configs-supported")
+            .action(store())
+            .required(true)
+            .type(Boolean.class)
+            .dest("describeConfigsSupported")
+            .metavar("DESCRIBE_CONFIGS_SUPPORTED")
+            .help("Whether describeConfigs is supported in the AdminClient.");
+
         Namespace res = null;
         try {
             res = parser.parseArgs(args);
@@ -181,8 +233,9 @@ public class ClientCompatibilityTest {
         this.message2 = buf2.array();
     }
 
-    void run() throws Exception {
+    void run() throws Throwable {
         long prodTimeMs = Time.SYSTEM.milliseconds();
+        testAdminClient();
         testProduce();
         testConsume(prodTimeMs);
     }
@@ -202,6 +255,111 @@ public class ClientCompatibilityTest {
         producer.close();
     }
 
+    void testAdminClient() throws Throwable {
+        Properties adminProps = new Properties();
+        adminProps.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, testConfig.bootstrapServer);
+        try (final Admin client = Admin.create(adminProps)) {
+            while (true) {
+                Collection<Node> nodes = client.describeCluster().nodes().get();
+                if (nodes.size() == testConfig.numClusterNodes) {
+                    break;
+                } else if (nodes.size() > testConfig.numClusterNodes) {
+                    throw new KafkaException("Expected to see " + testConfig.numClusterNodes +
+                        " nodes, but saw " + nodes.size());
+                }
+                Thread.sleep(1);
+                log.info("Saw only {} cluster nodes.  Waiting to see {}.",
+                    nodes.size(), testConfig.numClusterNodes);
+            }
+
+            testDescribeConfigsMethod(client);
+
+            tryFeature("createTopics", testConfig.createTopicsSupported,
+                () -> {
+                    try {
+                        client.createTopics(Collections.singleton(
+                            new NewTopic("newtopic", 1, (short) 1))).all().get();
+                    } catch (ExecutionException e) {
+                        throw e.getCause();
+                    }
+                },
+                () ->  createTopicsResultTest(client, Collections.singleton("newtopic"))
+            );
+
+            while (true) {
+                Collection<TopicListing> listings = client.listTopics().listings().get();
+                if (!testConfig.createTopicsSupported)
+                    break;
+
+                if (topicExists(listings, "newtopic"))
+                    break;
+
+                Thread.sleep(1);
+                log.info("Did not see newtopic.  Retrying listTopics...");
+            }
+
+            tryFeature("describeAclsSupported", testConfig.describeAclsSupported,
+                () -> {
+                    try {
+                        client.describeAcls(AclBindingFilter.ANY).values().get();
+                    } catch (ExecutionException e) {
+                        if (e.getCause() instanceof SecurityDisabledException)
+                            return;
+                        throw e.getCause();
+                    }
+                });
+        }
+    }
+
+    private void testDescribeConfigsMethod(final Admin client) throws Throwable {
+        tryFeature("describeConfigsSupported", testConfig.describeConfigsSupported,
+            () -> {
+                try {
+                    Collection<Node> nodes = client.describeCluster().nodes().get();
+
+                    final ConfigResource configResource = new ConfigResource(
+                        ConfigResource.Type.BROKER,
+                        nodes.iterator().next().idString()
+                    );
+
+                    Map<ConfigResource, Config> brokerConfig =
+                        client.describeConfigs(Collections.singleton(configResource)).all().get();
+
+                    if (brokerConfig.get(configResource).entries().isEmpty()) {
+                        throw new KafkaException("Expected to see config entries, but got zero entries");
+                    }
+                } catch (ExecutionException e) {
+                    throw e.getCause();
+                }
+            });
+    }
+
+    private void createTopicsResultTest(Admin client, Collection<String> topics)
+            throws InterruptedException, ExecutionException {
+        while (true) {
+            try {
+                client.describeTopics(topics).all().get();
+                break;
+            } catch (ExecutionException e) {
+                if (e.getCause() instanceof UnknownTopicOrPartitionException)
+                    continue;
+                throw e;
+            }
+        }
+    }
+
+    private boolean topicExists(Collection<TopicListing> listings, String topicName) {
+        boolean foundTopic = false;
+        for (TopicListing listing : listings) {
+            if (listing.name().equals(topicName)) {
+                if (listing.isInternal())
+                    throw new KafkaException(String.format("Did not expect %s to be an internal topic.", topicName));
+                foundTopic = true;
+            }
+        }
+        return foundTopic;
+    }
+
     private static class OffsetsForTime {
         Map<TopicPartition, OffsetAndTimestamp> result;
 
@@ -219,18 +377,8 @@ public class ClientCompatibilityTest {
         }
 
         @Override
-        public void configure(Map<String, ?> configs, boolean isKey) {
-            // nothing to do
-        }
-
-        @Override
         public byte[] deserialize(String topic, byte[] data) {
             return data;
-        }
-
-        @Override
-        public void close() {
-            // nothing to do
         }
 
         @Override
@@ -247,120 +395,124 @@ public class ClientCompatibilityTest {
         }
     }
 
-    public void testConsume(final long prodTimeMs) throws Exception {
+    public void testConsume(final long prodTimeMs) throws Throwable {
         Properties consumerProps = new Properties();
         consumerProps.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, testConfig.bootstrapServer);
         consumerProps.put(ConsumerConfig.MAX_PARTITION_FETCH_BYTES_CONFIG, 512);
         ClientCompatibilityTestDeserializer deserializer =
             new ClientCompatibilityTestDeserializer(testConfig.expectClusterId);
-        final KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<>(consumerProps, deserializer, deserializer);
-        final List<PartitionInfo> partitionInfos = consumer.partitionsFor(testConfig.topic);
-        if (partitionInfos.size() < 1)
-            throw new RuntimeException("Expected at least one partition for topic " + testConfig.topic);
-        final Map<TopicPartition, Long> timestampsToSearch = new HashMap<>();
-        final LinkedList<TopicPartition> topicPartitions = new LinkedList<>();
-        for (PartitionInfo partitionInfo : partitionInfos) {
-            TopicPartition topicPartition = new TopicPartition(partitionInfo.topic(), partitionInfo.partition());
-            timestampsToSearch.put(topicPartition, prodTimeMs);
-            topicPartitions.add(topicPartition);
-        }
-        final OffsetsForTime offsetsForTime = new OffsetsForTime();
-        tryFeature("offsetsForTimes", testConfig.offsetsForTimesSupported,
-                new Runnable() {
-                    @Override
-                    public void run() {
-                        offsetsForTime.result = consumer.offsetsForTimes(timestampsToSearch);
-                    }
-                },
-                new Runnable() {
-                    @Override
-                    public void run() {
-                        log.info("offsetsForTime = {}", offsetsForTime.result);
-                    }
-                });
-        // Whether or not offsetsForTimes works, beginningOffsets and endOffsets
-        // should work.
-        consumer.beginningOffsets(timestampsToSearch.keySet());
-        consumer.endOffsets(timestampsToSearch.keySet());
+        try (final KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<>(consumerProps, deserializer, deserializer)) {
+            final List<PartitionInfo> partitionInfos = consumer.partitionsFor(testConfig.topic);
+            if (partitionInfos.size() < 1)
+                throw new RuntimeException("Expected at least one partition for topic " + testConfig.topic);
+            final Map<TopicPartition, Long> timestampsToSearch = new HashMap<>();
+            final LinkedList<TopicPartition> topicPartitions = new LinkedList<>();
+            for (PartitionInfo partitionInfo : partitionInfos) {
+                TopicPartition topicPartition = new TopicPartition(partitionInfo.topic(), partitionInfo.partition());
+                timestampsToSearch.put(topicPartition, prodTimeMs);
+                topicPartitions.add(topicPartition);
+            }
+            final OffsetsForTime offsetsForTime = new OffsetsForTime();
+            tryFeature("offsetsForTimes", testConfig.offsetsForTimesSupported,
+                () -> offsetsForTime.result = consumer.offsetsForTimes(timestampsToSearch),
+                () -> log.info("offsetsForTime = {}", offsetsForTime.result));
+            // Whether or not offsetsForTimes works, beginningOffsets and endOffsets
+            // should work.
+            consumer.beginningOffsets(timestampsToSearch.keySet());
+            consumer.endOffsets(timestampsToSearch.keySet());
 
-        consumer.assign(topicPartitions);
-        consumer.seekToBeginning(topicPartitions);
-        final Iterator<byte[]> iter = new Iterator<byte[]>() {
-            private static final int TIMEOUT_MS = 10000;
-            private Iterator<ConsumerRecord<byte[], byte[]>> recordIter = null;
-            private byte[] next = null;
+            consumer.assign(topicPartitions);
+            consumer.seekToBeginning(topicPartitions);
+            final Iterator<byte[]> iter = new Iterator<byte[]>() {
+                private static final int TIMEOUT_MS = 10000;
+                private Iterator<ConsumerRecord<byte[], byte[]>> recordIter = null;
+                private byte[] next = null;
 
-            private byte[] fetchNext() {
-                while (true) {
-                    long curTime = Time.SYSTEM.milliseconds();
-                    if (curTime - prodTimeMs > TIMEOUT_MS)
-                        throw new RuntimeException("Timed out after " + TIMEOUT_MS + " ms.");
-                    if (recordIter == null) {
-                        ConsumerRecords<byte[], byte[]> records = consumer.poll(100);
-                        recordIter = records.iterator();
+                private byte[] fetchNext() {
+                    while (true) {
+                        long curTime = Time.SYSTEM.milliseconds();
+                        if (curTime - prodTimeMs > TIMEOUT_MS)
+                            throw new RuntimeException("Timed out after " + TIMEOUT_MS + " ms.");
+                        if (recordIter == null) {
+                            ConsumerRecords<byte[], byte[]> records = consumer.poll(Duration.ofMillis(100));
+                            recordIter = records.iterator();
+                        }
+                        if (recordIter.hasNext())
+                            return recordIter.next().value();
+                        recordIter = null;
                     }
-                    if (recordIter.hasNext())
-                        return recordIter.next().value();
-                    recordIter = null;
                 }
-            }
 
-            @Override
-            public boolean hasNext() {
-                if (next != null)
-                    return true;
-                next = fetchNext();
-                return next != null;
-            }
+                @Override
+                public boolean hasNext() {
+                    if (next != null)
+                        return true;
+                    next = fetchNext();
+                    return next != null;
+                }
 
-            @Override
-            public byte[] next() {
-                if (!hasNext())
-                    throw new NoSuchElementException();
-                byte[] cur = next;
-                next = null;
-                return cur;
-            }
+                @Override
+                public byte[] next() {
+                    if (!hasNext())
+                        throw new NoSuchElementException();
+                    byte[] cur = next;
+                    next = null;
+                    return cur;
+                }
 
-            @Override
-            public void remove() {
-                throw new UnsupportedOperationException();
-            }
-        };
-        byte[] next = iter.next();
-        try {
-            compareArrays(message1, next);
-            log.debug("Found first message...");
-        } catch (RuntimeException e) {
-            throw new RuntimeException("The first message in this topic was not ours. Please use a new topic when " +
-                    "running this program.");
-        }
-        try {
-            next = iter.next();
-            if (testConfig.expectRecordTooLargeException)
-                throw new RuntimeException("Expected to get a RecordTooLargeException when reading a record " +
-                        "bigger than " + ConsumerConfig.MAX_PARTITION_FETCH_BYTES_CONFIG);
+                @Override
+                public void remove() {
+                    throw new UnsupportedOperationException();
+                }
+            };
+            byte[] next = iter.next();
             try {
-                compareArrays(message2, next);
+                compareArrays(message1, next);
+                log.debug("Found first message...");
             } catch (RuntimeException e) {
-                System.out.println("The second message in this topic was not ours. Please use a new " +
-                    "topic when running this program.");
-                Exit.exit(1);
+                throw new RuntimeException("The first message in this topic was not ours. Please use a new topic when " +
+                        "running this program.");
             }
-        } catch (RecordTooLargeException e) {
-            log.debug("Got RecordTooLargeException", e);
-            if (!testConfig.expectRecordTooLargeException)
-                throw new RuntimeException("Got an unexpected RecordTooLargeException when reading a record " +
-                    "bigger than " + ConsumerConfig.MAX_PARTITION_FETCH_BYTES_CONFIG);
+            try {
+                next = iter.next();
+                if (testConfig.expectRecordTooLargeException) {
+                    throw new RuntimeException("Expected to get a RecordTooLargeException when reading a record " +
+                            "bigger than " + ConsumerConfig.MAX_PARTITION_FETCH_BYTES_CONFIG);
+                }
+                try {
+                    compareArrays(message2, next);
+                } catch (RuntimeException e) {
+                    System.out.println("The second message in this topic was not ours. Please use a new " +
+                        "topic when running this program.");
+                    Exit.exit(1);
+                }
+            } catch (RecordTooLargeException e) {
+                log.debug("Got RecordTooLargeException", e);
+                if (!testConfig.expectRecordTooLargeException)
+                    throw new RuntimeException("Got an unexpected RecordTooLargeException when reading a record " +
+                        "bigger than " + ConsumerConfig.MAX_PARTITION_FETCH_BYTES_CONFIG);
+            }
+            log.debug("Closing consumer.");
         }
-        log.debug("Closing consumer.");
-        consumer.close();
         log.info("Closed consumer.");
     }
 
-    private void tryFeature(String featureName, boolean supported, Runnable invoker, Runnable resultTester) {
+    private interface Invoker {
+        void invoke() throws Throwable;
+    }
+
+    private interface ResultTester {
+        void test() throws Throwable;
+    }
+
+    private void tryFeature(String featureName, boolean supported, Invoker invoker) throws Throwable {
+        tryFeature(featureName, supported, invoker, () -> { });
+    }
+
+    private void tryFeature(String featureName, boolean supported, Invoker invoker, ResultTester resultTester)
+            throws Throwable {
         try {
-            invoker.run();
+            invoker.invoke();
             log.info("Successfully used feature {}", featureName);
         } catch (UnsupportedVersionException e) {
             log.info("Got UnsupportedVersionException when attempting to use feature {}", featureName);
@@ -372,6 +524,6 @@ public class ClientCompatibilityTest {
         if (!supported) {
             throw new RuntimeException("Did not expect " + featureName + " to be supported, but it was.");
         }
-        resultTester.run();
+        resultTester.test();
     }
 }

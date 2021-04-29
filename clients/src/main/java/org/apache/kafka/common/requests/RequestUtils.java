@@ -16,67 +16,65 @@
  */
 package org.apache.kafka.common.requests;
 
-import org.apache.kafka.clients.admin.AccessControlEntry;
-import org.apache.kafka.clients.admin.AccessControlEntryFilter;
-import org.apache.kafka.clients.admin.AclOperation;
-import org.apache.kafka.clients.admin.AclPermissionType;
-import org.apache.kafka.clients.admin.Resource;
-import org.apache.kafka.clients.admin.ResourceFilter;
-import org.apache.kafka.clients.admin.ResourceType;
-import org.apache.kafka.common.protocol.types.Struct;
+import org.apache.kafka.common.message.ProduceRequestData;
+import org.apache.kafka.common.protocol.ByteBufferAccessor;
+import org.apache.kafka.common.protocol.Message;
+import org.apache.kafka.common.protocol.ObjectSerializationCache;
+import org.apache.kafka.common.record.RecordBatch;
+import org.apache.kafka.common.record.Records;
 
-class RequestUtils {
-    static Resource resourceFromStructFields(Struct struct) {
-        byte resourceType = struct.getByte("resource_type");
-        String name = struct.getString("resource_name");
-        return new Resource(ResourceType.fromCode(resourceType), name);
+import java.nio.ByteBuffer;
+import java.util.Iterator;
+import java.util.Optional;
+import java.util.function.Predicate;
+
+public final class RequestUtils {
+
+    private RequestUtils() {}
+
+    public static Optional<Integer> getLeaderEpoch(int leaderEpoch) {
+        return leaderEpoch == RecordBatch.NO_PARTITION_LEADER_EPOCH ?
+            Optional.empty() : Optional.of(leaderEpoch);
     }
 
-    static void resourceSetStructFields(Resource resource, Struct struct) {
-        struct.set("resource_type", resource.resourceType().code());
-        struct.set("resource_name", resource.name());
+    public static boolean hasTransactionalRecords(ProduceRequest request) {
+        return flag(request, RecordBatch::isTransactional);
     }
 
-    static ResourceFilter resourceFilterFromStructFields(Struct struct) {
-        byte resourceType = struct.getByte("resource_type");
-        String name = struct.getString("resource_name");
-        return new ResourceFilter(ResourceType.fromCode(resourceType), name);
+    /**
+     * find a flag from all records of a produce request.
+     * @param request produce request
+     * @param predicate used to predicate the record
+     * @return true if there is any matched flag in the produce request. Otherwise, false
+     */
+    static boolean flag(ProduceRequest request, Predicate<RecordBatch> predicate) {
+        for (ProduceRequestData.TopicProduceData tp : request.data().topicData()) {
+            for (ProduceRequestData.PartitionProduceData p : tp.partitionData()) {
+                if (p.records() instanceof Records) {
+                    Iterator<? extends RecordBatch> iter = (((Records) p.records())).batchIterator();
+                    if (iter.hasNext() && predicate.test(iter.next())) return true;
+                }
+            }
+        }
+        return false;
     }
 
-    static void resourceFilterSetStructFields(ResourceFilter resourceFilter, Struct struct) {
-        struct.set("resource_type", resourceFilter.resourceType().code());
-        struct.set("resource_name", resourceFilter.name());
-    }
+    public static ByteBuffer serialize(
+        Message header,
+        short headerVersion,
+        Message apiMessage,
+        short apiVersion
+    ) {
+        ObjectSerializationCache cache = new ObjectSerializationCache();
 
-    static AccessControlEntry aceFromStructFields(Struct struct) {
-        String principal = struct.getString("principal");
-        String host = struct.getString("host");
-        byte operation = struct.getByte("operation");
-        byte permissionType = struct.getByte("permission_type");
-        return new AccessControlEntry(principal, host, AclOperation.fromCode(operation),
-            AclPermissionType.fromCode(permissionType));
-    }
+        int headerSize = header.size(cache, headerVersion);
+        int messageSize = apiMessage.size(cache, apiVersion);
+        ByteBufferAccessor writable = new ByteBufferAccessor(ByteBuffer.allocate(headerSize + messageSize));
 
-    static void aceSetStructFields(AccessControlEntry data, Struct struct) {
-        struct.set("principal", data.principal());
-        struct.set("host", data.host());
-        struct.set("operation", data.operation().code());
-        struct.set("permission_type", data.permissionType().code());
-    }
+        header.write(writable, cache, headerVersion);
+        apiMessage.write(writable, cache, apiVersion);
 
-    static AccessControlEntryFilter aceFilterFromStructFields(Struct struct) {
-        String principal = struct.getString("principal");
-        String host = struct.getString("host");
-        byte operation = struct.getByte("operation");
-        byte permissionType = struct.getByte("permission_type");
-        return new AccessControlEntryFilter(principal, host, AclOperation.fromCode(operation),
-            AclPermissionType.fromCode(permissionType));
-    }
-
-    static void aceFilterSetStructFields(AccessControlEntryFilter filter, Struct struct) {
-        struct.set("principal", filter.principal());
-        struct.set("host", filter.host());
-        struct.set("operation", filter.operation().code());
-        struct.set("permission_type", filter.permissionType().code());
+        writable.flip();
+        return writable.buffer();
     }
 }

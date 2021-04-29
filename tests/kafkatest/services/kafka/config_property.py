@@ -18,6 +18,11 @@ Define Kafka configuration property names here.
 """
 
 BROKER_ID = "broker.id"
+NODE_ID = "node.id"
+FIRST_BROKER_PORT = 9092
+FIRST_CONTROLLER_PORT = FIRST_BROKER_PORT + 500
+FIRST_CONTROLLER_ID = 3001
+CLUSTER_ID = "I2eXt9rvSnyhct8BYmW6-w"
 PORT = "port"
 ADVERTISED_HOSTNAME = "advertised.host.name"
 
@@ -33,16 +38,31 @@ NUM_RECOVERY_THREADS_PER_DATA_DIR = "num.recovery.threads.per.data.dir"
 LOG_RETENTION_HOURS = "log.retention.hours"
 LOG_SEGMENT_BYTES = "log.segment.bytes"
 LOG_RETENTION_CHECK_INTERVAL_MS = "log.retention.check.interval.ms"
+LOG_RETENTION_MS = "log.retention.ms"
 LOG_CLEANER_ENABLE = "log.cleaner.enable"
 
 AUTO_CREATE_TOPICS_ENABLE = "auto.create.topics.enable"
 
 ZOOKEEPER_CONNECT = "zookeeper.connect"
+ZOOKEEPER_SSL_CLIENT_ENABLE = "zookeeper.ssl.client.enable"
+ZOOKEEPER_CLIENT_CNXN_SOCKET = "zookeeper.clientCnxnSocket"
 ZOOKEEPER_CONNECTION_TIMEOUT_MS = "zookeeper.connection.timeout.ms"
+ZOOKEEPER_SESSION_TIMEOUT_MS = "zookeeper.session.timeout.ms"
 INTER_BROKER_PROTOCOL_VERSION = "inter.broker.protocol.version"
 MESSAGE_FORMAT_VERSION = "log.message.format.version"
 MESSAGE_TIMESTAMP_TYPE = "message.timestamp.type"
 THROTTLING_REPLICATION_RATE_LIMIT = "replication.quota.throttled.rate"
+
+LOG_FLUSH_INTERVAL_MESSAGE = "log.flush.interval.messages"
+REPLICA_HIGHWATERMARK_CHECKPOINT_INTERVAL_MS = "replica.high.watermark.checkpoint.interval.ms"
+LOG_ROLL_TIME_MS = "log.roll.ms"
+OFFSETS_TOPIC_NUM_PARTITIONS = "offsets.topic.num.partitions"
+
+DELEGATION_TOKEN_MAX_LIFETIME_MS="delegation.token.max.lifetime.ms"
+DELEGATION_TOKEN_EXPIRY_TIME_MS="delegation.token.expiry.time.ms"
+DELEGATION_TOKEN_SECRET_KEY="delegation.token.secret.key"
+SASL_ENABLED_MECHANISMS="sasl.enabled.mechanisms"
+
 
 """
 From KafkaConfig.scala

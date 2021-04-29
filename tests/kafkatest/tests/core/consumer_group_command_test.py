@@ -20,7 +20,7 @@ from ducktape.mark import matrix
 from ducktape.mark.resource import cluster
 
 from kafkatest.services.zookeeper import ZookeeperService
-from kafkatest.services.kafka import KafkaService
+from kafkatest.services.kafka import KafkaService, quorum
 from kafkatest.services.console_consumer import ConsoleConsumer
 from kafkatest.services.security.security_config import SecurityConfig
 
@@ -45,30 +45,31 @@ class ConsumerGroupCommandTest(Test):
         self.topics = {
             TOPIC: {'partitions': 1, 'replication-factor': 1}
         }
-        self.zk = ZookeeperService(test_context, self.num_zk)
+        self.zk = ZookeeperService(test_context, self.num_zk) if quorum.for_test(test_context) == quorum.zk else None
 
     def setUp(self):
-        self.zk.start()
+        if self.zk:
+            self.zk.start()
 
     def start_kafka(self, security_protocol, interbroker_security_protocol):
         self.kafka = KafkaService(
             self.test_context, self.num_brokers,
             self.zk, security_protocol=security_protocol,
-            interbroker_security_protocol=interbroker_security_protocol, topics=self.topics)
+            interbroker_security_protocol=interbroker_security_protocol, topics=self.topics,
+            controller_num_nodes_override=self.num_zk)
         self.kafka.start()
 
-    def start_consumer(self, security_protocol):
-        enable_new_consumer = security_protocol == SecurityConfig.SSL
+    def start_consumer(self):
         self.consumer = ConsoleConsumer(self.test_context, num_nodes=self.num_brokers, kafka=self.kafka, topic=TOPIC,
-                                        consumer_timeout_ms=None, new_consumer=enable_new_consumer)
+                                        consumer_timeout_ms=None)
         self.consumer.start()
 
     def setup_and_verify(self, security_protocol, group=None):
         self.start_kafka(security_protocol, security_protocol)
-        self.start_consumer(security_protocol)
+        self.start_consumer()
         consumer_node = self.consumer.nodes[0]
         wait_until(lambda: self.consumer.alive(consumer_node),
-                   timeout_sec=10, backoff_sec=.2, err_msg="Consumer was too slow to start")
+                   timeout_sec=20, backoff_sec=.2, err_msg="Consumer was too slow to start")
         kafka_node = self.kafka.nodes[0]
         if security_protocol is not SecurityConfig.PLAINTEXT:
             prop_file = str(self.kafka.security_config.client_config())
@@ -77,23 +78,20 @@ class ConsumerGroupCommandTest(Test):
             kafka_node.account.create_file(self.COMMAND_CONFIG_FILE, prop_file)
 
         # Verify ConsumerGroupCommand lists expected consumer groups
-        enable_new_consumer = security_protocol != SecurityConfig.PLAINTEXT
-        command_config_file = None
-        if enable_new_consumer:
-            command_config_file = self.COMMAND_CONFIG_FILE
+        command_config_file = self.COMMAND_CONFIG_FILE
 
         if group:
-            wait_until(lambda: re.search("topic-consumer-group-command",self.kafka.describe_consumer_group(group=group, node=kafka_node, new_consumer=enable_new_consumer, command_config=command_config_file)), timeout_sec=10,
+            wait_until(lambda: re.search("topic-consumer-group-command",self.kafka.describe_consumer_group(group=group, node=kafka_node, command_config=command_config_file)), timeout_sec=10,
                        err_msg="Timed out waiting to list expected consumer groups.")
         else:
-            wait_until(lambda: "test-consumer-group" in self.kafka.list_consumer_groups(node=kafka_node, new_consumer=enable_new_consumer, command_config=command_config_file), timeout_sec=10,
+            wait_until(lambda: "test-consumer-group" in self.kafka.list_consumer_groups(node=kafka_node, command_config=command_config_file), timeout_sec=10,
                        err_msg="Timed out waiting to list expected consumer groups.")
 
         self.consumer.stop()
 
     @cluster(num_nodes=3)
-    @matrix(security_protocol=['PLAINTEXT', 'SSL'])
-    def test_list_consumer_groups(self, security_protocol='PLAINTEXT'):
+    @matrix(security_protocol=['PLAINTEXT', 'SSL'], metadata_quorum=quorum.all_non_upgrade)
+    def test_list_consumer_groups(self, security_protocol='PLAINTEXT', metadata_quorum=quorum.zk):
         """
         Tests if ConsumerGroupCommand is listing correct consumer groups
         :return: None
@@ -101,8 +99,8 @@ class ConsumerGroupCommandTest(Test):
         self.setup_and_verify(security_protocol)
 
     @cluster(num_nodes=3)
-    @matrix(security_protocol=['PLAINTEXT', 'SSL'])
-    def test_describe_consumer_group(self, security_protocol='PLAINTEXT'):
+    @matrix(security_protocol=['PLAINTEXT', 'SSL'], metadata_quorum=quorum.all_non_upgrade)
+    def test_describe_consumer_group(self, security_protocol='PLAINTEXT', metadata_quorum=quorum.zk):
         """
         Tests if ConsumerGroupCommand is describing a consumer group correctly
         :return: None

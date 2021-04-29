@@ -16,20 +16,17 @@
  */
 package org.apache.kafka.common.requests;
 
+import org.apache.kafka.common.message.DeleteTopicsResponseData;
 import org.apache.kafka.common.protocol.ApiKeys;
+import org.apache.kafka.common.protocol.ByteBufferAccessor;
 import org.apache.kafka.common.protocol.Errors;
-import org.apache.kafka.common.protocol.types.Struct;
 
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 
+
 public class DeleteTopicsResponse extends AbstractResponse {
-    private static final String TOPIC_ERROR_CODES_KEY_NAME = "topic_error_codes";
-    private static final String TOPIC_KEY_NAME = "topic";
-    private static final String ERROR_CODE_KEY_NAME = "error_code";
 
     /**
      * Possible error codes:
@@ -38,58 +35,41 @@ public class DeleteTopicsResponse extends AbstractResponse {
      * INVALID_TOPIC_EXCEPTION(17)
      * TOPIC_AUTHORIZATION_FAILED(29)
      * NOT_CONTROLLER(41)
+     * INVALID_REQUEST(42)
+     * TOPIC_DELETION_DISABLED(73)
      */
-    private final Map<String, Errors> errors;
-    private final int throttleTimeMs;
+    private final DeleteTopicsResponseData data;
 
-    public DeleteTopicsResponse(Map<String, Errors> errors) {
-        this(DEFAULT_THROTTLE_TIME, errors);
-    }
-
-    public DeleteTopicsResponse(int throttleTimeMs, Map<String, Errors> errors) {
-        this.throttleTimeMs = throttleTimeMs;
-        this.errors = errors;
-    }
-
-    public DeleteTopicsResponse(Struct struct) {
-        this.throttleTimeMs = struct.hasField(THROTTLE_TIME_KEY_NAME) ? struct.getInt(THROTTLE_TIME_KEY_NAME) : DEFAULT_THROTTLE_TIME;
-        Object[] topicErrorCodesStructs = struct.getArray(TOPIC_ERROR_CODES_KEY_NAME);
-        Map<String, Errors> errors = new HashMap<>();
-        for (Object topicErrorCodeStructObj : topicErrorCodesStructs) {
-            Struct topicErrorCodeStruct = (Struct) topicErrorCodeStructObj;
-            String topic = topicErrorCodeStruct.getString(TOPIC_KEY_NAME);
-            Errors error = Errors.forCode(topicErrorCodeStruct.getShort(ERROR_CODE_KEY_NAME));
-            errors.put(topic, error);
-        }
-
-        this.errors = errors;
+    public DeleteTopicsResponse(DeleteTopicsResponseData data) {
+        super(ApiKeys.DELETE_TOPICS);
+        this.data = data;
     }
 
     @Override
-    protected Struct toStruct(short version) {
-        Struct struct = new Struct(ApiKeys.DELETE_TOPICS.responseSchema(version));
-        if (struct.hasField(THROTTLE_TIME_KEY_NAME))
-            struct.set(THROTTLE_TIME_KEY_NAME, throttleTimeMs);
-        List<Struct> topicErrorCodeStructs = new ArrayList<>(errors.size());
-        for (Map.Entry<String, Errors> topicError : errors.entrySet()) {
-            Struct topicErrorCodeStruct = struct.instance(TOPIC_ERROR_CODES_KEY_NAME);
-            topicErrorCodeStruct.set(TOPIC_KEY_NAME, topicError.getKey());
-            topicErrorCodeStruct.set(ERROR_CODE_KEY_NAME, topicError.getValue().code());
-            topicErrorCodeStructs.add(topicErrorCodeStruct);
-        }
-        struct.set(TOPIC_ERROR_CODES_KEY_NAME, topicErrorCodeStructs.toArray());
-        return struct;
-    }
-
     public int throttleTimeMs() {
-        return throttleTimeMs;
+        return data.throttleTimeMs();
     }
 
-    public Map<String, Errors> errors() {
-        return errors;
+    @Override
+    public DeleteTopicsResponseData data() {
+        return data;
+    }
+
+    @Override
+    public Map<Errors, Integer> errorCounts() {
+        HashMap<Errors, Integer> counts = new HashMap<>();
+        data.responses().forEach(result ->
+            updateErrorCounts(counts, Errors.forCode(result.errorCode()))
+        );
+        return counts;
     }
 
     public static DeleteTopicsResponse parse(ByteBuffer buffer, short version) {
-        return new DeleteTopicsResponse(ApiKeys.DELETE_TOPICS.responseSchema(version).read(buffer));
+        return new DeleteTopicsResponse(new DeleteTopicsResponseData(new ByteBufferAccessor(buffer), version));
+    }
+
+    @Override
+    public boolean shouldClientThrottle(short version) {
+        return version >= 2;
     }
 }

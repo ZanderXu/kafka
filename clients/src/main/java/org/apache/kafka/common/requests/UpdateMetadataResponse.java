@@ -16,43 +16,44 @@
  */
 package org.apache.kafka.common.requests;
 
+import org.apache.kafka.common.message.UpdateMetadataResponseData;
 import org.apache.kafka.common.protocol.ApiKeys;
+import org.apache.kafka.common.protocol.ByteBufferAccessor;
 import org.apache.kafka.common.protocol.Errors;
-import org.apache.kafka.common.protocol.types.Struct;
 
 import java.nio.ByteBuffer;
+import java.util.Map;
 
 public class UpdateMetadataResponse extends AbstractResponse {
 
-    private static final String ERROR_CODE_KEY_NAME = "error_code";
+    private final UpdateMetadataResponseData data;
 
-    /**
-     * Possible error code:
-     *
-     * STALE_CONTROLLER_EPOCH (11)
-     */
-    private final Errors error;
-
-    public UpdateMetadataResponse(Errors error) {
-        this.error = error;
-    }
-
-    public UpdateMetadataResponse(Struct struct) {
-        error = Errors.forCode(struct.getShort(ERROR_CODE_KEY_NAME));
+    public UpdateMetadataResponse(UpdateMetadataResponseData data) {
+        super(ApiKeys.UPDATE_METADATA);
+        this.data = data;
     }
 
     public Errors error() {
-        return error;
-    }
-
-    public static UpdateMetadataResponse parse(ByteBuffer buffer, short version) {
-        return new UpdateMetadataResponse(ApiKeys.UPDATE_METADATA_KEY.parseResponse(version, buffer));
+        return Errors.forCode(data.errorCode());
     }
 
     @Override
-    protected Struct toStruct(short version) {
-        Struct struct = new Struct(ApiKeys.UPDATE_METADATA_KEY.responseSchema(version));
-        struct.set(ERROR_CODE_KEY_NAME, error.code());
-        return struct;
+    public Map<Errors, Integer> errorCounts() {
+        return errorCounts(error());
     }
+
+    @Override
+    public int throttleTimeMs() {
+        return DEFAULT_THROTTLE_TIME;
+    }
+
+    public static UpdateMetadataResponse parse(ByteBuffer buffer, short version) {
+        return new UpdateMetadataResponse(new UpdateMetadataResponseData(new ByteBufferAccessor(buffer), version));
+    }
+
+    @Override
+    public UpdateMetadataResponseData data() {
+        return data;
+    }
+
 }

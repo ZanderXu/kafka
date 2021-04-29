@@ -16,20 +16,22 @@
  */
 package org.apache.kafka.streams.tests;
 
+import java.time.Duration;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.apache.kafka.common.utils.Exit;
+import org.apache.kafka.streams.errors.StreamsUncaughtExceptionHandler;
+import org.apache.kafka.streams.kstream.Consumed;
 import org.apache.kafka.streams.KafkaStreams;
+import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.kstream.ForeachAction;
 import org.apache.kafka.streams.kstream.KStream;
-import org.apache.kafka.streams.kstream.KStreamBuilder;
 
 import java.util.Properties;
-import java.util.concurrent.TimeUnit;
 
 public class ShutdownDeadlockTest {
 
@@ -44,8 +46,8 @@ public class ShutdownDeadlockTest {
         final Properties props = new Properties();
         props.setProperty(StreamsConfig.APPLICATION_ID_CONFIG, "shouldNotDeadlock");
         props.setProperty(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, kafka);
-        final KStreamBuilder builder = new KStreamBuilder();
-        final KStream<String, String> source = builder.stream(Serdes.String(), Serdes.String(), topic);
+        final StreamsBuilder builder = new StreamsBuilder();
+        final KStream<String, String> source = builder.stream(topic, Consumed.with(Serdes.String(), Serdes.String()));
 
         source.foreach(new ForeachAction<String, String>() {
             @Override
@@ -53,20 +55,13 @@ public class ShutdownDeadlockTest {
                 throw new RuntimeException("KABOOM!");
             }
         });
-        final KafkaStreams streams = new KafkaStreams(builder, props);
-        streams.setUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
-            @Override
-            public void uncaughtException(final Thread t, final Throwable e) {
-                Exit.exit(1);
-            }
+        final KafkaStreams streams = new KafkaStreams(builder.build(), props);
+        streams.setUncaughtExceptionHandler(e -> {
+            Exit.exit(1);
+            return StreamsUncaughtExceptionHandler.StreamThreadExceptionResponse.SHUTDOWN_CLIENT;
         });
 
-        Runtime.getRuntime().addShutdownHook(new Thread(new Runnable() {
-            @Override
-            public void run() {
-                streams.close(5, TimeUnit.SECONDS);
-            }
-        }));
+        Exit.addShutdownHook("streams-shutdown-hook", () -> streams.close(Duration.ofSeconds(5)));
 
         final Properties producerProps = new Properties();
         producerProps.put(ProducerConfig.CLIENT_ID_CONFIG, "SmokeTest");
@@ -83,7 +78,7 @@ public class ShutdownDeadlockTest {
         synchronized (this) {
             try {
                 wait();
-            } catch (InterruptedException e) {
+            } catch (final InterruptedException e) {
                 // ignored
             }
         }

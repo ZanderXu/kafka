@@ -16,10 +16,9 @@
   */
 package kafka.server
 
-import java.util.concurrent.locks.ReentrantReadWriteLock
+import java.util.concurrent.locks.ReadWriteLock
 
-import org.apache.kafka.common.MetricName
-import org.apache.kafka.common.metrics.{Metrics, Sensor, MeasurableStat, MetricConfig}
+import org.apache.kafka.common.metrics.{Metrics, Sensor}
 
 /**
   * Class which centralises the logic for creating/accessing sensors.
@@ -27,9 +26,9 @@ import org.apache.kafka.common.metrics.{Metrics, Sensor, MeasurableStat, MetricC
   *
   * The later arguments are passed as methods as they are only called when the sensor is instantiated.
   */
-class SensorAccess {
+class SensorAccess(lock: ReadWriteLock, metrics: Metrics) {
 
-  def getOrCreate(sensorName: String, expirationTime: Long, lock: ReentrantReadWriteLock, metrics: Metrics, metricName: () => MetricName, config: () => MetricConfig, measure: () => MeasurableStat): Sensor = {
+  def getOrCreate(sensorName: String, expirationTime: Long, registerMetrics: Sensor => Unit): Sensor = {
     var sensor: Sensor = null
 
     /* Acquire the read lock to fetch the sensor. It is safe to call getSensor from multiple threads.
@@ -41,12 +40,8 @@ class SensorAccess {
      * at which point it is safe to read
      */
     lock.readLock().lock()
-    try {
-      sensor = metrics.getSensor(sensorName)
-    }
-    finally {
-      lock.readLock().unlock()
-    }
+    try sensor = metrics.getSensor(sensorName)
+    finally lock.readLock().unlock()
 
     /* If the sensor is null, try to create it else return the existing sensor
      * The sensor can be null, hence the null checks
@@ -64,8 +59,8 @@ class SensorAccess {
         // ensure that we initialise `ClientSensors` with non-null parameters.
         sensor = metrics.getSensor(sensorName)
         if (sensor == null) {
-          sensor = metrics.sensor(sensorName, config(), expirationTime)
-          sensor.add(metricName(), measure())
+          sensor = metrics.sensor(sensorName, null, expirationTime)
+          registerMetrics(sensor)
         }
       } finally {
         lock.writeLock().unlock()

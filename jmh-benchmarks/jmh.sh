@@ -19,7 +19,7 @@ jmh_project_name="jmh-benchmarks"
 
 if [ ${base_dir} == "." ]; then
      gradlew_dir=".."
-elif [ ${base_dir} == ${jmh_project_name} ]; then
+elif [ ${base_dir##./} == "${jmh_project_name}" ]; then
      gradlew_dir="."
 else
     echo "JMH Benchmarks need to be run from the root of the kafka repository or the 'jmh-benchmarks' directory"
@@ -35,8 +35,8 @@ $gradleCmd  -q :jmh-benchmarks:clean :jmh-benchmarks:shadowJar
 
 echo "gradle build done"
 
-echo "running JMH with args [$@]"
+echo "running JMH with args: $@"
 
-java -jar ${libDir}/kafka-jmh-benchmarks-all.jar "$@"
+java -jar ${libDir}/kafka-jmh-benchmarks-*.jar "$@"
 
 echo "JMH benchmarks done"

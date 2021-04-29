@@ -16,14 +16,18 @@
  */
 package org.apache.kafka.common.record;
 
+import org.apache.kafka.common.InvalidRecordException;
 import org.apache.kafka.common.record.AbstractLegacyRecordBatch.ByteBufferLegacyRecordBatch;
 import org.apache.kafka.common.utils.Utils;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.List;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 public class AbstractLegacyRecordBatchTest {
 
@@ -56,7 +60,50 @@ public class AbstractLegacyRecordBatchTest {
             assertEquals(offset++, record.offset());
     }
 
-    @Test(expected = IllegalArgumentException.class)
+    /**
+     * The wrapper offset should be 0 in v0, but not in v1. However, the latter worked by accident and some versions of
+     * librdkafka now depend on it. So we support 0 for compatibility reasons, but the recommendation is to set the
+     * wrapper offset to the relative offset of the last record in the batch.
+     */
+    @Test
+    public void testIterateCompressedRecordWithWrapperOffsetZero() {
+        for (byte magic : Arrays.asList(RecordBatch.MAGIC_VALUE_V0, RecordBatch.MAGIC_VALUE_V1)) {
+            SimpleRecord[] simpleRecords = new SimpleRecord[] {
+                new SimpleRecord(1L, "a".getBytes(), "1".getBytes()),
+                new SimpleRecord(2L, "b".getBytes(), "2".getBytes()),
+                new SimpleRecord(3L, "c".getBytes(), "3".getBytes())
+            };
+
+            MemoryRecords records = MemoryRecords.withRecords(magic, 0L,
+                    CompressionType.GZIP, TimestampType.CREATE_TIME, simpleRecords);
+
+            ByteBufferLegacyRecordBatch batch = new ByteBufferLegacyRecordBatch(records.buffer());
+            batch.setLastOffset(0L);
+
+            long offset = 0L;
+            for (Record record : batch)
+                assertEquals(offset++, record.offset());
+        }
+    }
+
+    @Test
+    public void testInvalidWrapperOffsetV1() {
+        SimpleRecord[] simpleRecords = new SimpleRecord[] {
+            new SimpleRecord(1L, "a".getBytes(), "1".getBytes()),
+            new SimpleRecord(2L, "b".getBytes(), "2".getBytes()),
+            new SimpleRecord(3L, "c".getBytes(), "3".getBytes())
+        };
+
+        MemoryRecords records = MemoryRecords.withRecords(RecordBatch.MAGIC_VALUE_V1, 0L,
+                CompressionType.GZIP, TimestampType.CREATE_TIME, simpleRecords);
+
+        ByteBufferLegacyRecordBatch batch = new ByteBufferLegacyRecordBatch(records.buffer());
+        batch.setLastOffset(1L);
+
+        assertThrows(InvalidRecordException.class, batch::iterator);
+    }
+
+    @Test
     public void testSetNoTimestampTypeNotAllowed() {
         MemoryRecords records = MemoryRecords.withRecords(RecordBatch.MAGIC_VALUE_V1, 0L,
                 CompressionType.GZIP, TimestampType.CREATE_TIME,
@@ -64,10 +111,10 @@ public class AbstractLegacyRecordBatchTest {
                 new SimpleRecord(2L, "b".getBytes(), "2".getBytes()),
                 new SimpleRecord(3L, "c".getBytes(), "3".getBytes()));
         ByteBufferLegacyRecordBatch batch = new ByteBufferLegacyRecordBatch(records.buffer());
-        batch.setMaxTimestamp(TimestampType.NO_TIMESTAMP_TYPE, RecordBatch.NO_TIMESTAMP);
+        assertThrows(IllegalArgumentException.class, () -> batch.setMaxTimestamp(TimestampType.NO_TIMESTAMP_TYPE, RecordBatch.NO_TIMESTAMP));
     }
 
-    @Test(expected = UnsupportedOperationException.class)
+    @Test
     public void testSetLogAppendTimeNotAllowedV0() {
         MemoryRecords records = MemoryRecords.withRecords(RecordBatch.MAGIC_VALUE_V0, 0L,
                 CompressionType.GZIP, TimestampType.CREATE_TIME,
@@ -76,10 +123,10 @@ public class AbstractLegacyRecordBatchTest {
                 new SimpleRecord(3L, "c".getBytes(), "3".getBytes()));
         long logAppendTime = 15L;
         ByteBufferLegacyRecordBatch batch = new ByteBufferLegacyRecordBatch(records.buffer());
-        batch.setMaxTimestamp(TimestampType.LOG_APPEND_TIME, logAppendTime);
+        assertThrows(UnsupportedOperationException.class, () -> batch.setMaxTimestamp(TimestampType.LOG_APPEND_TIME, logAppendTime));
     }
 
-    @Test(expected = UnsupportedOperationException.class)
+    @Test
     public void testSetCreateTimeNotAllowedV0() {
         MemoryRecords records = MemoryRecords.withRecords(RecordBatch.MAGIC_VALUE_V0, 0L,
                 CompressionType.GZIP, TimestampType.CREATE_TIME,
@@ -88,10 +135,10 @@ public class AbstractLegacyRecordBatchTest {
                 new SimpleRecord(3L, "c".getBytes(), "3".getBytes()));
         long createTime = 15L;
         ByteBufferLegacyRecordBatch batch = new ByteBufferLegacyRecordBatch(records.buffer());
-        batch.setMaxTimestamp(TimestampType.CREATE_TIME, createTime);
+        assertThrows(UnsupportedOperationException.class, () -> batch.setMaxTimestamp(TimestampType.CREATE_TIME, createTime));
     }
 
-    @Test(expected = UnsupportedOperationException.class)
+    @Test
     public void testSetPartitionLeaderEpochNotAllowedV0() {
         MemoryRecords records = MemoryRecords.withRecords(RecordBatch.MAGIC_VALUE_V0, 0L,
                 CompressionType.GZIP, TimestampType.CREATE_TIME,
@@ -99,10 +146,10 @@ public class AbstractLegacyRecordBatchTest {
                 new SimpleRecord(2L, "b".getBytes(), "2".getBytes()),
                 new SimpleRecord(3L, "c".getBytes(), "3".getBytes()));
         ByteBufferLegacyRecordBatch batch = new ByteBufferLegacyRecordBatch(records.buffer());
-        batch.setPartitionLeaderEpoch(15);
+        assertThrows(UnsupportedOperationException.class, () -> batch.setPartitionLeaderEpoch(15));
     }
 
-    @Test(expected = UnsupportedOperationException.class)
+    @Test
     public void testSetPartitionLeaderEpochNotAllowedV1() {
         MemoryRecords records = MemoryRecords.withRecords(RecordBatch.MAGIC_VALUE_V1, 0L,
                 CompressionType.GZIP, TimestampType.CREATE_TIME,
@@ -110,7 +157,7 @@ public class AbstractLegacyRecordBatchTest {
                 new SimpleRecord(2L, "b".getBytes(), "2".getBytes()),
                 new SimpleRecord(3L, "c".getBytes(), "3".getBytes()));
         ByteBufferLegacyRecordBatch batch = new ByteBufferLegacyRecordBatch(records.buffer());
-        batch.setPartitionLeaderEpoch(15);
+        assertThrows(UnsupportedOperationException.class, () -> batch.setPartitionLeaderEpoch(15));
     }
 
     @Test
@@ -162,6 +209,43 @@ public class AbstractLegacyRecordBatchTest {
         long expectedTimestamp = 1L;
         for (Record record : records.records())
             assertEquals(expectedTimestamp++, record.timestamp());
+    }
+
+    @Test
+    public void testZStdCompressionTypeWithV0OrV1() {
+        SimpleRecord[] simpleRecords = new SimpleRecord[] {
+            new SimpleRecord(1L, "a".getBytes(), "1".getBytes()),
+            new SimpleRecord(2L, "b".getBytes(), "2".getBytes()),
+            new SimpleRecord(3L, "c".getBytes(), "3".getBytes())
+        };
+
+        // Check V0
+        try {
+            MemoryRecords records = MemoryRecords.withRecords(RecordBatch.MAGIC_VALUE_V0, 0L,
+                CompressionType.ZSTD, TimestampType.CREATE_TIME, simpleRecords);
+
+            ByteBufferLegacyRecordBatch batch = new ByteBufferLegacyRecordBatch(records.buffer());
+            batch.setLastOffset(1L);
+
+            batch.iterator();
+            fail("Can't reach here");
+        } catch (IllegalArgumentException e) {
+            assertEquals("ZStandard compression is not supported for magic 0", e.getMessage());
+        }
+
+        // Check V1
+        try {
+            MemoryRecords records = MemoryRecords.withRecords(RecordBatch.MAGIC_VALUE_V1, 0L,
+                CompressionType.ZSTD, TimestampType.CREATE_TIME, simpleRecords);
+
+            ByteBufferLegacyRecordBatch batch = new ByteBufferLegacyRecordBatch(records.buffer());
+            batch.setLastOffset(1L);
+
+            batch.iterator();
+            fail("Can't reach here");
+        } catch (IllegalArgumentException e) {
+            assertEquals("ZStandard compression is not supported for magic 1", e.getMessage());
+        }
     }
 
 }

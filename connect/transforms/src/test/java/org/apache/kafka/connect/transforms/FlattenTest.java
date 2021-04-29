@@ -22,39 +22,49 @@ import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.errors.DataException;
 import org.apache.kafka.connect.source.SourceRecord;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
-import static org.junit.Assert.assertArrayEquals;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class FlattenTest {
+    private final Flatten<SourceRecord> xformKey = new Flatten.Key<>();
+    private final Flatten<SourceRecord> xformValue = new Flatten.Value<>();
 
-    @Test(expected = DataException.class)
-    public void topLevelStructRequired() {
-        final Flatten<SourceRecord> xform = new Flatten.Value<>();
-        xform.configure(Collections.<String, String>emptyMap());
-        xform.apply(new SourceRecord(null, null, "topic", 0, Schema.INT32_SCHEMA, 42));
+    @AfterEach
+    public void teardown() {
+        xformKey.close();
+        xformValue.close();
     }
 
-    @Test(expected = DataException.class)
+    @Test
+    public void topLevelStructRequired() {
+        xformValue.configure(Collections.<String, String>emptyMap());
+        assertThrows(DataException.class, () -> xformValue.apply(new SourceRecord(null, null,
+                "topic", 0, Schema.INT32_SCHEMA, 42)));
+    }
+
+    @Test
     public void topLevelMapRequired() {
-        final Flatten<SourceRecord> xform = new Flatten.Value<>();
-        xform.configure(Collections.<String, String>emptyMap());
-        xform.apply(new SourceRecord(null, null, "topic", 0, null, 42));
+        xformValue.configure(Collections.<String, String>emptyMap());
+        assertThrows(DataException.class, () -> xformValue.apply(new SourceRecord(null, null,
+                "topic", 0, null, 42)));
     }
 
     @Test
     public void testNestedStruct() {
-        final Flatten<SourceRecord> xform = new Flatten.Value<>();
-        xform.configure(Collections.<String, String>emptyMap());
+        xformValue.configure(Collections.<String, String>emptyMap());
 
         SchemaBuilder builder = SchemaBuilder.struct();
         builder.field("int8", Schema.INT8_SCHEMA);
@@ -93,7 +103,7 @@ public class FlattenTest {
         Struct twoLevelNestedStruct = new Struct(twoLevelNestedSchema);
         twoLevelNestedStruct.put("A", oneLevelNestedStruct);
 
-        SourceRecord transformed = xform.apply(new SourceRecord(null, null,
+        SourceRecord transformed = xformValue.apply(new SourceRecord(null, null,
                 "topic", 0,
                 twoLevelNestedSchema, twoLevelNestedStruct));
 
@@ -113,8 +123,7 @@ public class FlattenTest {
 
     @Test
     public void testNestedMapWithDelimiter() {
-        final Flatten<SourceRecord> xform = new Flatten.Value<>();
-        xform.configure(Collections.singletonMap("delimiter", "#"));
+        xformValue.configure(Collections.singletonMap("delimiter", "#"));
 
         Map<String, Object> supportedTypes = new HashMap<>();
         supportedTypes.put("int8", (byte) 8);
@@ -127,15 +136,16 @@ public class FlattenTest {
         supportedTypes.put("string", "stringy");
         supportedTypes.put("bytes", "bytes".getBytes());
 
-        Map<String, Object> oneLevelNestedMap = Collections.singletonMap("B", (Object) supportedTypes);
-        Map<String, Object> twoLevelNestedMap = Collections.singletonMap("A", (Object) oneLevelNestedMap);
+        Map<String, Object> oneLevelNestedMap = Collections.singletonMap("B", supportedTypes);
+        Map<String, Object> twoLevelNestedMap = Collections.singletonMap("A", oneLevelNestedMap);
 
-        SourceRecord transformed = xform.apply(new SourceRecord(null, null,
+        SourceRecord transformed = xformValue.apply(new SourceRecord(null, null,
                 "topic", 0,
                 null, twoLevelNestedMap));
 
         assertNull(transformed.valueSchema());
         assertTrue(transformed.value() instanceof Map);
+        @SuppressWarnings("unchecked")
         Map<String, Object> transformedMap = (Map<String, Object>) transformed.value();
         assertEquals(9, transformedMap.size());
         assertEquals((byte) 8, transformedMap.get("A#B#int8"));
@@ -151,8 +161,7 @@ public class FlattenTest {
 
     @Test
     public void testOptionalFieldStruct() {
-        final Flatten<SourceRecord> xform = new Flatten.Value<>();
-        xform.configure(Collections.<String, String>emptyMap());
+        xformValue.configure(Collections.<String, String>emptyMap());
 
         SchemaBuilder builder = SchemaBuilder.struct();
         builder.field("opt_int32", Schema.OPTIONAL_INT32_SCHEMA);
@@ -168,7 +177,7 @@ public class FlattenTest {
         Struct oneLevelNestedStruct = new Struct(oneLevelNestedSchema);
         oneLevelNestedStruct.put("B", supportedTypes);
 
-        SourceRecord transformed = xform.apply(new SourceRecord(null, null,
+        SourceRecord transformed = xformValue.apply(new SourceRecord(null, null,
                 "topic", 0,
                 oneLevelNestedSchema, oneLevelNestedStruct));
 
@@ -178,21 +187,61 @@ public class FlattenTest {
     }
 
     @Test
+    public void testOptionalStruct() {
+        xformValue.configure(Collections.<String, String>emptyMap());
+
+        SchemaBuilder builder = SchemaBuilder.struct().optional();
+        builder.field("opt_int32", Schema.OPTIONAL_INT32_SCHEMA);
+        Schema schema = builder.build();
+
+        SourceRecord transformed = xformValue.apply(new SourceRecord(null, null,
+            "topic", 0,
+            schema, null));
+
+        assertEquals(Schema.Type.STRUCT, transformed.valueSchema().type());
+        assertNull(transformed.value());
+    }
+
+    @Test
+    public void testOptionalNestedStruct() {
+        xformValue.configure(Collections.<String, String>emptyMap());
+
+        SchemaBuilder builder = SchemaBuilder.struct().optional();
+        builder.field("opt_int32", Schema.OPTIONAL_INT32_SCHEMA);
+        Schema supportedTypesSchema = builder.build();
+
+        builder = SchemaBuilder.struct();
+        builder.field("B", supportedTypesSchema);
+        Schema oneLevelNestedSchema = builder.build();
+
+        Struct oneLevelNestedStruct = new Struct(oneLevelNestedSchema);
+        oneLevelNestedStruct.put("B", null);
+
+        SourceRecord transformed = xformValue.apply(new SourceRecord(null, null,
+            "topic", 0,
+            oneLevelNestedSchema, oneLevelNestedStruct));
+
+        assertEquals(Schema.Type.STRUCT, transformed.valueSchema().type());
+        Struct transformedStruct = (Struct) transformed.value();
+        assertNull(transformedStruct.get("B.opt_int32"));
+    }
+
+    @Test
     public void testOptionalFieldMap() {
-        final Flatten<SourceRecord> xform = new Flatten.Value<>();
-        xform.configure(Collections.<String, String>emptyMap());
+        xformValue.configure(Collections.<String, String>emptyMap());
 
         Map<String, Object> supportedTypes = new HashMap<>();
         supportedTypes.put("opt_int32", null);
 
-        Map<String, Object> oneLevelNestedMap = Collections.singletonMap("B", (Object) supportedTypes);
+        Map<String, Object> oneLevelNestedMap = Collections.singletonMap("B", supportedTypes);
 
-        SourceRecord transformed = xform.apply(new SourceRecord(null, null,
+        SourceRecord transformed = xformValue.apply(new SourceRecord(null, null,
                 "topic", 0,
                 null, oneLevelNestedMap));
 
         assertNull(transformed.valueSchema());
         assertTrue(transformed.value() instanceof Map);
+        @SuppressWarnings("unchecked")
         Map<String, Object> transformedMap = (Map<String, Object>) transformed.value();
 
         assertNull(transformedMap.get("B.opt_int32"));
@@ -200,25 +249,25 @@ public class FlattenTest {
 
     @Test
     public void testKey() {
-        final Flatten<SourceRecord> xform = new Flatten.Key<>();
-        xform.configure(Collections.<String, String>emptyMap());
+        xformKey.configure(Collections.<String, String>emptyMap());
 
         Map<String, Map<String, Integer>> key = Collections.singletonMap("A", Collections.singletonMap("B", 12));
         SourceRecord src = new SourceRecord(null, null, "topic", null, key, null, null);
-        SourceRecord transformed = xform.apply(src);
+        SourceRecord transformed = xformKey.apply(src);
 
         assertNull(transformed.keySchema());
         assertTrue(transformed.key() instanceof Map);
+        @SuppressWarnings("unchecked")
         Map<String, Object> transformedMap = (Map<String, Object>) transformed.key();
         assertEquals(12, transformedMap.get("A.B"));
     }
 
-    @Test(expected = DataException.class)
+    @Test
     public void testUnsupportedTypeInMap() {
-        final Flatten<SourceRecord> xform = new Flatten.Value<>();
-        xform.configure(Collections.<String, String>emptyMap());
+        xformValue.configure(Collections.<String, String>emptyMap());
         Object value = Collections.singletonMap("foo", Arrays.asList("bar", "baz"));
-        xform.apply(new SourceRecord(null, null, "topic", 0, null, value));
+        assertThrows(DataException.class, () -> xformValue.apply(new SourceRecord(null, null,
+                "topic", 0, null, value)));
     }
 
     @Test
@@ -227,8 +276,7 @@ public class FlattenTest {
         // children should also be optional. Similarly, if the parent Struct has a default value, the default value for
         // the flattened field
 
-        final Flatten<SourceRecord> xform = new Flatten.Value<>();
-        xform.configure(Collections.<String, String>emptyMap());
+        xformValue.configure(Collections.<String, String>emptyMap());
 
         SchemaBuilder builder = SchemaBuilder.struct().optional();
         builder.field("req_field", Schema.STRING_SCHEMA);
@@ -240,7 +288,7 @@ public class FlattenTest {
         // Intentionally leave this entire value empty since it is optional
         Struct value = new Struct(schema);
 
-        SourceRecord transformed = xform.apply(new SourceRecord(null, null, "topic", 0, schema, value));
+        SourceRecord transformed = xformValue.apply(new SourceRecord(null, null, "topic", 0, schema, value));
 
         assertNotNull(transformed);
         Schema transformedSchema = transformed.valueSchema();
@@ -253,5 +301,73 @@ public class FlattenTest {
         // the parent didn't specify the default explicitly, we should still be using the field's normal default
         Schema transformedOptFieldSchema = SchemaBuilder.string().optional().defaultValue("child_default").build();
         assertEquals(transformedOptFieldSchema, transformedSchema.field("opt_field").schema());
+    }
+
+    @Test
+    public void tombstoneEventWithoutSchemaShouldPassThrough() {
+        xformValue.configure(Collections.<String, String>emptyMap());
+
+        final SourceRecord record = new SourceRecord(null, null, "test", 0,
+                null, null);
+        final SourceRecord transformedRecord = xformValue.apply(record);
+
+        assertNull(transformedRecord.value());
+        assertNull(transformedRecord.valueSchema());
+    }
+
+    @Test
+    public void tombstoneEventWithSchemaShouldPassThrough() {
+        xformValue.configure(Collections.<String, String>emptyMap());
+
+        final Schema simpleStructSchema = SchemaBuilder.struct().name("name").version(1).doc("doc").field("magic", Schema.OPTIONAL_INT64_SCHEMA).build();
+        final SourceRecord record = new SourceRecord(null, null, "test", 0,
+                simpleStructSchema, null);
+        final SourceRecord transformedRecord = xformValue.apply(record);
+
+        assertNull(transformedRecord.value());
+        assertEquals(simpleStructSchema, transformedRecord.valueSchema());
+    }
+
+    @Test
+    public void testMapWithNullFields() {
+        xformValue.configure(Collections.emptyMap());
+
+        // Use a LinkedHashMap to ensure the SMT sees entries in a specific order
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("firstNull", null);
+        value.put("firstNonNull", "nonNull");
+        value.put("secondNull", null);
+        value.put("secondNonNull", "alsoNonNull");
+        value.put("thirdNonNull", null);
+
+        final SourceRecord record = new SourceRecord(null, null, "test", 0, null, value);
+        final SourceRecord transformedRecord = xformValue.apply(record);
+
+        assertEquals(value, transformedRecord.value());
+    }
+
+    @Test
+    public void testStructWithNullFields() {
+        xformValue.configure(Collections.emptyMap());
+
+        final Schema structSchema = SchemaBuilder.struct()
+            .field("firstNull", Schema.OPTIONAL_STRING_SCHEMA)
+            .field("firstNonNull", Schema.OPTIONAL_STRING_SCHEMA)
+            .field("secondNull", Schema.OPTIONAL_STRING_SCHEMA)
+            .field("secondNonNull", Schema.OPTIONAL_STRING_SCHEMA)
+            .field("thirdNonNull", Schema.OPTIONAL_STRING_SCHEMA)
+            .build();
+
+        final Struct value = new Struct(structSchema);
+        value.put("firstNull", null);
+        value.put("firstNonNull", "nonNull");
+        value.put("secondNull", null);
+        value.put("secondNonNull", "alsoNonNull");
+        value.put("thirdNonNull", null);
+
+        final SourceRecord record = new SourceRecord(null, null, "test", 0, structSchema, value);
+        final SourceRecord transformedRecord = xformValue.apply(record);
+
+        assertEquals(value, transformedRecord.value());
     }
 }

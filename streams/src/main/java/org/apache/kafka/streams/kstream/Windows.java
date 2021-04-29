@@ -16,17 +16,18 @@
  */
 package org.apache.kafka.streams.kstream;
 
-import org.apache.kafka.common.annotation.InterfaceStability;
 import org.apache.kafka.streams.processor.TimestampExtractor;
 
 import java.util.Map;
 
 /**
- * The window specification interface for fixed size windows that is used to define window boundaries and window
- * maintain duration.
+ * The window specification for fixed size windows that is used to define window boundaries and grace period.
  * <p>
- * If not explicitly specified, the default maintain duration is 1 day.
- * For time semantics, see {@link TimestampExtractor}.
+ * Grace period defines how long to wait on out-of-order events. That is, windows will continue to accept new records until {@code stream_time >= window_end + grace_period}.
+ * Records that arrive after the grace period passed are considered <em>late</em> and will not be processed but are dropped.
+ * <p>
+ * Warning: It may be unsafe to use objects of this class in set- or map-like collections,
+ * since the equals and hashCode methods depend on mutable fields.
  *
  * @param <W> type of the window instance
  * @see TimeWindows
@@ -35,65 +36,13 @@ import java.util.Map;
  * @see SessionWindows
  * @see TimestampExtractor
  */
-@InterfaceStability.Unstable
 public abstract class Windows<W extends Window> {
 
-    private static final int DEFAULT_NUM_SEGMENTS = 3;
+    // By default grace period is 24 hours for all windows,
+    // in other words we allow out-of-order data for up to a day
+    protected static final long DEFAULT_GRACE_PERIOD_MS = 24 * 60 * 60 * 1000L;
 
-    static final long DEFAULT_MAINTAIN_DURATION_MS = 24 * 60 * 60 * 1000L; // one day
-
-    private long maintainDurationMs;
-
-    public int segments;
-
-    protected Windows() {
-        segments = DEFAULT_NUM_SEGMENTS;
-        maintainDurationMs = DEFAULT_MAINTAIN_DURATION_MS;
-    }
-
-    /**
-     * Set the window maintain duration (retention time) in milliseconds.
-     * This retention time is a guaranteed <i>lower bound</i> for how long a window will be maintained.
-     *
-     * @param durationMs the window retention time in milliseconds
-     * @return itself
-     * @throws IllegalArgumentException if {@code durationMs} is negative
-     */
-    // This should always get overridden to provide the correct return type and thus to avoid a cast
-    public Windows<W> until(final long durationMs) throws IllegalArgumentException {
-        if (durationMs < 0) {
-            throw new IllegalArgumentException("Window retention time (durationMs) cannot be negative.");
-        }
-        maintainDurationMs = durationMs;
-
-        return this;
-    }
-
-    /**
-     * Return the window maintain duration (retention time) in milliseconds.
-     *
-     * @return the window maintain duration
-     */
-    public long maintainMs() {
-        return maintainDurationMs;
-    }
-
-    /**
-     * Set the number of segments to be used for rolling the window store.
-     * This function is not exposed to users but can be called by developers that extend this class.
-     *
-     * @param segments the number of segments to be used
-     * @return itself
-     * @throws IllegalArgumentException if specified segments is small than 2
-     */
-    protected Windows<W> segments(final int segments) throws IllegalArgumentException {
-        if (segments < 2) {
-            throw new IllegalArgumentException("Number of segments must be at least 2.");
-        }
-        this.segments = segments;
-
-        return this;
-    }
+    protected Windows() {}
 
     /**
      * Create all windows that contain the provided timestamp, indexed by non-negative window start timestamps.
@@ -109,4 +58,12 @@ public abstract class Windows<W extends Window> {
      * @return the size of the specified windows
      */
     public abstract long size();
+
+    /**
+     * Return the window grace period (the time to admit
+     * out-of-order events after the end of the window.)
+     *
+     * Delay is defined as (stream_time - record_timestamp).
+     */
+    public abstract long gracePeriodMs();
 }

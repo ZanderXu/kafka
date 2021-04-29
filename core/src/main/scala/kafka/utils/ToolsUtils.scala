@@ -16,13 +16,9 @@
 */
 package kafka.utils
 
-import java.util
-import java.util.Comparator
-
 import joptsimple.OptionParser
 import org.apache.kafka.common.{Metric, MetricName}
 
-import scala.collection.immutable.ListMap
 import scala.collection.mutable
 
 object ToolsUtils {
@@ -32,9 +28,8 @@ object ToolsUtils {
       hostPort.split(",")
     else
       Array(hostPort)
-    val validHostPort = hostPorts.filter {
-      hostPortData =>
-        org.apache.kafka.common.utils.Utils.getPort(hostPortData) != null
+    val validHostPort = hostPorts.filter { hostPortData =>
+      org.apache.kafka.common.utils.Utils.getPort(hostPortData) != null
     }
     val isValid = !validHostPort.isEmpty && validHostPort.size == hostPorts.length
     if(!isValid)
@@ -57,12 +52,16 @@ object ToolsUtils {
         if (maxLengthOfDisplayName < mergedKeyName.length) {
           maxLengthOfDisplayName = mergedKeyName.length
         }
-        (mergedKeyName, value.value())
+        (mergedKeyName, value.metricValue)
     }
     println(s"\n%-${maxLengthOfDisplayName}s   %s".format("Metric Name", "Value"))
     sortedMap.foreach {
       case (metricName, value) =>
-        println(s"%-${maxLengthOfDisplayName}s : %.3f".format(metricName, value))
+        val specifier = value match {
+          case _ @ (_: java.lang.Float | _: java.lang.Double) => "%.3f"
+          case _ => "%s"
+        }
+        println(s"%-${maxLengthOfDisplayName}s : $specifier".format(metricName, value))
     }
   }
 }

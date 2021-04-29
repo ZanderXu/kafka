@@ -59,7 +59,10 @@ public class ProducerPerformance {
             List<String> producerProps = res.getList("producerConfig");
             String producerConfig = res.getString("producerConfigFile");
             String payloadFilePath = res.getString("payloadFile");
+            String transactionalId = res.getString("transactionalId");
             boolean shouldPrintMetrics = res.getBoolean("printMetrics");
+            long transactionDurationMs = res.getLong("transactionDurationMs");
+            boolean transactionsEnabled =  0 < transactionDurationMs;
 
             // since default value gets printed with the help text, we are escaping \n there and replacing it with correct value here.
             String payloadDelimiter = res.getString("payloadDelimiter").equals("\\n") ? "\n" : res.getString("payloadDelimiter");
@@ -76,7 +79,7 @@ public class ProducerPerformance {
                     throw new  IllegalArgumentException("File does not exist or empty file provided.");
                 }
 
-                String[] payloadList = new String(Files.readAllBytes(path), "UTF-8").split(payloadDelimiter);
+                String[] payloadList = new String(Files.readAllBytes(path), StandardCharsets.UTF_8).split(payloadDelimiter);
 
                 System.out.println("Number of messages read: " + payloadList.length);
 
@@ -99,35 +102,63 @@ public class ProducerPerformance {
 
             props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.ByteArraySerializer");
             props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.ByteArraySerializer");
-            KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(props);
+            if (transactionsEnabled)
+                props.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, transactionalId);
+
+            KafkaProducer<byte[], byte[]> producer = new KafkaProducer<>(props);
+
+            if (transactionsEnabled)
+                producer.initTransactions();
 
             /* setup perf test */
             byte[] payload = null;
-            Random random = new Random(0);
             if (recordSize != null) {
                 payload = new byte[recordSize];
-                for (int i = 0; i < payload.length; ++i)
-                    payload[i] = (byte) (random.nextInt(26) + 65);
             }
+            Random random = new Random(0);
             ProducerRecord<byte[], byte[]> record;
             Stats stats = new Stats(numRecords, 5000);
             long startMs = System.currentTimeMillis();
 
             ThroughputThrottler throttler = new ThroughputThrottler(throughput, startMs);
-            for (int i = 0; i < numRecords; i++) {
+
+            int currentTransactionSize = 0;
+            long transactionStartTime = 0;
+            for (long i = 0; i < numRecords; i++) {
+
                 if (payloadFilePath != null) {
                     payload = payloadByteList.get(random.nextInt(payloadByteList.size()));
+                } else if (recordSize != null) {
+                    for (int j = 0; j < payload.length; ++j)
+                        payload[j] = (byte) (random.nextInt(26) + 65);
+                } else {
+                    throw new IllegalArgumentException("no payload File Path or record Size provided");
                 }
+
+                if (transactionsEnabled && currentTransactionSize == 0) {
+                    producer.beginTransaction();
+                    transactionStartTime = System.currentTimeMillis();
+                }
+
                 record = new ProducerRecord<>(topicName, payload);
 
                 long sendStartMs = System.currentTimeMillis();
                 Callback cb = stats.nextCompletion(sendStartMs, payload.length, stats);
                 producer.send(record, cb);
 
+                currentTransactionSize++;
+                if (transactionsEnabled && transactionDurationMs <= (sendStartMs - transactionStartTime)) {
+                    producer.commitTransaction();
+                    currentTransactionSize = 0;
+                }
+
                 if (throttler.shouldThrottle(i, sendStartMs)) {
                     throttler.throttle();
                 }
             }
+
+            if (transactionsEnabled && currentTransactionSize != 0)
+                producer.commitTransaction();
 
             if (!shouldPrintMetrics) {
                 producer.close();
@@ -220,7 +251,7 @@ public class ProducerPerformance {
                 .required(true)
                 .type(Integer.class)
                 .metavar("THROUGHPUT")
-                .help("throttle maximum message throughput to *approximately* THROUGHPUT messages/sec");
+                .help("throttle maximum message throughput to *approximately* THROUGHPUT messages/sec. Set this to -1 to disable throttling.");
 
         parser.addArgument("--producer-props")
                  .nargs("+")
@@ -246,6 +277,25 @@ public class ProducerPerformance {
                 .dest("printMetrics")
                 .help("print out metrics at the end of the test.");
 
+        parser.addArgument("--transactional-id")
+               .action(store())
+               .required(false)
+               .type(String.class)
+               .metavar("TRANSACTIONAL-ID")
+               .dest("transactionalId")
+               .setDefault("performance-producer-default-transactional-id")
+               .help("The transactionalId to use if transaction-duration-ms is > 0. Useful when testing the performance of concurrent transactions.");
+
+        parser.addArgument("--transaction-duration-ms")
+               .action(store())
+               .required(false)
+               .type(Long.class)
+               .metavar("TRANSACTION-DURATION")
+               .dest("transactionDurationMs")
+               .setDefault(0L)
+               .help("The max age of each transaction. The commitTransaction will be called after this time has elapsed. Transactions are only enabled if this value is positive.");
+
+
         return parser;
     }
 
@@ -269,7 +319,6 @@ public class ProducerPerformance {
         public Stats(long numRecords, int reportingInterval) {
             this.start = System.currentTimeMillis();
             this.windowStart = System.currentTimeMillis();
-            this.index = 0;
             this.iteration = 0;
             this.sampling = (int) (numRecords / Math.min(numRecords, 500000));
             this.latencies = new int[(int) (numRecords / this.sampling) + 1];
@@ -311,10 +360,10 @@ public class ProducerPerformance {
         }
 
         public void printWindow() {
-            long ellapsed = System.currentTimeMillis() - windowStart;
-            double recsPerSec = 1000.0 * windowCount / (double) ellapsed;
-            double mbPerSec = 1000.0 * this.windowBytes / (double) ellapsed / (1024.0 * 1024.0);
-            System.out.printf("%d records sent, %.1f records/sec (%.2f MB/sec), %.1f ms avg latency, %.1f max latency.%n",
+            long elapsed = System.currentTimeMillis() - windowStart;
+            double recsPerSec = 1000.0 * windowCount / (double) elapsed;
+            double mbPerSec = 1000.0 * this.windowBytes / (double) elapsed / (1024.0 * 1024.0);
+            System.out.printf("%d records sent, %.1f records/sec (%.2f MB/sec), %.1f ms avg latency, %.1f ms max latency.%n",
                               windowCount,
                               recsPerSec,
                               mbPerSec,

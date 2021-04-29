@@ -22,45 +22,72 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Collection;
+import java.util.function.BiConsumer;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
-public class CollectionUtils {
+public final class CollectionUtils {
+
+    private CollectionUtils() {}
+
+    /**
+     * Given two maps (A, B), returns all the key-value pairs in A whose keys are not contained in B
+     */
+    public static <K, V> Map<K, V> subtractMap(Map<? extends K, ? extends V> minuend, Map<? extends K, ? extends V> subtrahend) {
+        return minuend.entrySet().stream()
+                .filter(entry -> !subtrahend.containsKey(entry.getKey()))
+                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+    }
+
     /**
      * group data by topic
+     *
      * @param data Data to be partitioned
      * @param <T> Partition data type
      * @return partitioned data
      */
-    public static <T> Map<String, Map<Integer, T>> groupDataByTopic(Map<TopicPartition, ? extends T> data) {
+    public static <T> Map<String, Map<Integer, T>> groupPartitionDataByTopic(Map<TopicPartition, ? extends T> data) {
         Map<String, Map<Integer, T>> dataByTopic = new HashMap<>();
-        for (Map.Entry<TopicPartition, ? extends T> entry: data.entrySet()) {
+        for (Map.Entry<TopicPartition, ? extends T> entry : data.entrySet()) {
             String topic = entry.getKey().topic();
             int partition = entry.getKey().partition();
-            Map<Integer, T> topicData = dataByTopic.get(topic);
-            if (topicData == null) {
-                topicData = new HashMap<>();
-                dataByTopic.put(topic, topicData);
-            }
+            Map<Integer, T> topicData = dataByTopic.computeIfAbsent(topic, t -> new HashMap<>());
             topicData.put(partition, entry.getValue());
         }
         return dataByTopic;
     }
 
     /**
-     * group partitions by topic
-     * @param partitions
+     * Group a list of partitions by the topic name.
+     *
+     * @param partitions The partitions to collect
      * @return partitions per topic
      */
-    public static Map<String, List<Integer>> groupDataByTopic(List<TopicPartition> partitions) {
-        Map<String, List<Integer>> partitionsByTopic = new HashMap<>();
-        for (TopicPartition tp: partitions) {
+    public static Map<String, List<Integer>> groupPartitionsByTopic(Collection<TopicPartition> partitions) {
+        return groupPartitionsByTopic(
+            partitions,
+            topic -> new ArrayList<>(),
+            List::add
+        );
+    }
+
+    /**
+     * Group a collection of partitions by topic
+     *
+     * @return The map used to group the partitions
+     */
+    public static <T> Map<String, T> groupPartitionsByTopic(
+        Collection<TopicPartition> partitions,
+        Function<String, T> buildGroup,
+        BiConsumer<T, Integer> addToGroup
+    ) {
+        Map<String, T> dataByTopic = new HashMap<>();
+        for (TopicPartition tp : partitions) {
             String topic = tp.topic();
-            List<Integer> topicData = partitionsByTopic.get(topic);
-            if (topicData == null) {
-                topicData = new ArrayList<>();
-                partitionsByTopic.put(topic, topicData);
-            }
-            topicData.add(tp.partition());
+            T topicData = dataByTopic.computeIfAbsent(topic, buildGroup);
+            addToGroup.accept(topicData, tp.partition());
         }
-        return  partitionsByTopic;
+        return dataByTopic;
     }
 }

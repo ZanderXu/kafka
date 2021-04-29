@@ -17,71 +17,34 @@
 package org.apache.kafka.streams.kstream.internals;
 
 import org.apache.kafka.streams.kstream.ForeachAction;
-import org.apache.kafka.streams.kstream.PrintForeachAction;
-import org.apache.kafka.streams.processor.Processor;
-import org.apache.kafka.streams.processor.AbstractProcessor;
-import org.apache.kafka.streams.processor.ProcessorContext;
-import org.apache.kafka.streams.processor.ProcessorSupplier;
-import org.apache.kafka.common.serialization.Deserializer;
-import org.apache.kafka.common.serialization.Serde;
+import org.apache.kafka.streams.processor.api.Processor;
+import org.apache.kafka.streams.processor.api.ProcessorSupplier;
+import org.apache.kafka.streams.processor.api.Record;
 
-public class KStreamPrint<K, V> implements ProcessorSupplier<K, V> {
+public class KStreamPrint<K, V> implements ProcessorSupplier<K, V, Void, Void> {
 
-    private final Serde<?> keySerde;
-    private final Serde<?> valueSerde;
     private final ForeachAction<K, V> action;
-    
-    public KStreamPrint(final ForeachAction<K, V> action, final Serde<?> keySerde, final Serde<?> valueSerde) {
+
+    public KStreamPrint(final ForeachAction<K, V> action) {
         this.action = action;
-        this.keySerde = keySerde;
-        this.valueSerde = valueSerde;
     }
 
     @Override
-    public Processor<K, V> get() {
-        return new KStreamPrintProcessor(keySerde, valueSerde);
+    public Processor<K, V, Void, Void> get() {
+        return new KStreamPrintProcessor();
     }
 
-    private class KStreamPrintProcessor extends AbstractProcessor<K, V> {
-        
-        private Serde<?> keySerde;
-        private Serde<?> valueSerde;
-        private ProcessorContext context;
-        
-        public KStreamPrintProcessor(final Serde<?> keySerde, final Serde<?> valueSerde) {
-            this.keySerde = keySerde;
-            this.valueSerde = valueSerde;
-        }
+    private class KStreamPrintProcessor implements Processor<K, V, Void, Void> {
 
         @Override
-        public void init(ProcessorContext context) {
-            this.context = context;
-            if (keySerde == null) {
-                this.keySerde = context.keySerde();
-            }
-            if (valueSerde == null) {
-                this.valueSerde = context.valueSerde();
-            }
+        public void process(final Record<K, V> record) {
+            action.apply(record.key(), record.value());
         }
 
-        @Override
-        public void process(final K key, final V value) {
-            final K deKey = (K) maybeDeserialize(key, keySerde.deserializer());
-            final V deValue = (V) maybeDeserialize(value, valueSerde.deserializer());
-            action.apply(deKey, deValue);
-        }
-
-        private Object maybeDeserialize(final Object keyOrValue, final Deserializer<?> deserializer) {
-            if (keyOrValue instanceof byte[]) {
-                return deserializer.deserialize(this.context.topic(), (byte[]) keyOrValue);
-            }
-            return keyOrValue;
-        }
-        
         @Override
         public void close() {
             if (action instanceof PrintForeachAction) {
-                ((PrintForeachAction) action).close();
+                ((PrintForeachAction<K, V>) action).close();
             }
         }
     }

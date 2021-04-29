@@ -17,16 +17,13 @@
 
 package kafka.api
 
-import kafka.controller.LeaderIsrAndControllerEpoch
-import kafka.utils._
-
-import scala.collection.Set
-
 object LeaderAndIsr {
   val initialLeaderEpoch: Int = 0
   val initialZKVersion: Int = 0
   val NoLeader: Int = -1
+  val NoEpoch: Int = -1
   val LeaderDuringDelete: Int = -2
+  val EpochDuringDelete: Int = -2
 
   def apply(leader: Int, isr: List[Int]): LeaderAndIsr = LeaderAndIsr(leader, initialLeaderEpoch, isr, initialZKVersion)
 
@@ -41,22 +38,25 @@ case class LeaderAndIsr(leader: Int,
 
   def newLeader(leader: Int) = newLeaderAndIsr(leader, isr)
 
-  def newLeaderAndIsr(leader: Int, isr: List[Int]) = LeaderAndIsr(leader, leaderEpoch + 1, isr, zkVersion + 1)
+  def newLeaderAndIsr(leader: Int, isr: List[Int]) = LeaderAndIsr(leader, leaderEpoch + 1, isr, zkVersion)
 
   def newEpochAndZkVersion = newLeaderAndIsr(leader, isr)
 
-  override def toString: String = {
-    Json.encode(Map("leader" -> leader, "leader_epoch" -> leaderEpoch, "isr" -> isr))
+  def leaderOpt: Option[Int] = {
+    if (leader == LeaderAndIsr.NoLeader) None else Some(leader)
   }
-}
 
-case class PartitionStateInfo(leaderIsrAndControllerEpoch: LeaderIsrAndControllerEpoch, allReplicas: Set[Int]) {
+  def equalsIgnoreZk(other: LeaderAndIsr): Boolean = {
+    if (this == other) {
+      true
+    } else if (other == null) {
+      false
+    } else {
+      leader == other.leader && leaderEpoch == other.leaderEpoch && isr.equals(other.isr)
+    }
+  }
 
   override def toString: String = {
-    val partitionStateInfo = new StringBuilder
-    partitionStateInfo.append("(LeaderAndIsrInfo:" + leaderIsrAndControllerEpoch.toString)
-    partitionStateInfo.append(",ReplicationFactor:" + allReplicas.size + ")")
-    partitionStateInfo.append(",AllReplicas:" + allReplicas.mkString(",") + ")")
-    partitionStateInfo.toString()
+    s"LeaderAndIsr(leader=$leader, leaderEpoch=$leaderEpoch, isr=$isr, zkVersion=$zkVersion)"
   }
 }

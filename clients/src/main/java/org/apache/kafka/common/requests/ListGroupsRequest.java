@@ -16,58 +16,73 @@
  */
 package org.apache.kafka.common.requests;
 
+import org.apache.kafka.common.errors.UnsupportedVersionException;
+import org.apache.kafka.common.message.ListGroupsRequestData;
+import org.apache.kafka.common.message.ListGroupsResponseData;
 import org.apache.kafka.common.protocol.ApiKeys;
+import org.apache.kafka.common.protocol.ByteBufferAccessor;
 import org.apache.kafka.common.protocol.Errors;
-import org.apache.kafka.common.protocol.types.Struct;
 
 import java.nio.ByteBuffer;
 import java.util.Collections;
 
+/**
+ * Possible error codes:
+ *
+ * COORDINATOR_LOAD_IN_PROGRESS (14)
+ * COORDINATOR_NOT_AVAILABLE (15)
+ * AUTHORIZATION_FAILED (29)
+ */
 public class ListGroupsRequest extends AbstractRequest {
+
     public static class Builder extends AbstractRequest.Builder<ListGroupsRequest> {
-        public Builder() {
+
+        private final ListGroupsRequestData data;
+
+        public Builder(ListGroupsRequestData data) {
             super(ApiKeys.LIST_GROUPS);
+            this.data = data;
         }
 
         @Override
         public ListGroupsRequest build(short version) {
-            return new ListGroupsRequest(version);
+            if (!data.statesFilter().isEmpty() && version < 4) {
+                throw new UnsupportedVersionException("The broker only supports ListGroups " +
+                        "v" + version + ", but we need v4 or newer to request groups by states.");
+            }
+            return new ListGroupsRequest(data, version);
         }
 
         @Override
         public String toString() {
-            return "(type=ListGroupsRequest)";
+            return data.toString();
         }
     }
 
-    public ListGroupsRequest(short version) {
-        super(version);
-    }
+    private final ListGroupsRequestData data;
 
-    public ListGroupsRequest(Struct struct, short versionId) {
-        super(versionId);
+    public ListGroupsRequest(ListGroupsRequestData data, short version) {
+        super(ApiKeys.LIST_GROUPS, version);
+        this.data = data;
     }
 
     @Override
-    public AbstractResponse getErrorResponse(int throttleTimeMs, Throwable e) {
-        short versionId = version();
-        switch (versionId) {
-            case 0:
-                return new ListGroupsResponse(Errors.forException(e), Collections.<ListGroupsResponse.Group>emptyList());
-            case 1:
-                return new ListGroupsResponse(throttleTimeMs, Errors.forException(e), Collections.<ListGroupsResponse.Group>emptyList());
-            default:
-                throw new IllegalArgumentException(String.format("Version %d is not valid. Valid versions for %s are 0 to %d",
-                        versionId, this.getClass().getSimpleName(), ApiKeys.LIST_GROUPS.latestVersion()));
+    public ListGroupsResponse getErrorResponse(int throttleTimeMs, Throwable e) {
+        ListGroupsResponseData listGroupsResponseData = new ListGroupsResponseData().
+            setGroups(Collections.emptyList()).
+            setErrorCode(Errors.forException(e).code());
+        if (version() >= 1) {
+            listGroupsResponseData.setThrottleTimeMs(throttleTimeMs);
         }
+        return new ListGroupsResponse(listGroupsResponseData);
     }
 
     public static ListGroupsRequest parse(ByteBuffer buffer, short version) {
-        return new ListGroupsRequest(ApiKeys.LIST_GROUPS.parseRequest(version, buffer), version);
+        return new ListGroupsRequest(new ListGroupsRequestData(new ByteBufferAccessor(buffer), version), version);
     }
 
     @Override
-    protected Struct toStruct() {
-        return new Struct(ApiKeys.LIST_GROUPS.requestSchema(version()));
+    public ListGroupsRequestData data() {
+        return data;
     }
 }

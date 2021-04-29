@@ -20,20 +20,24 @@ package org.apache.kafka.clients.admin;
 import org.apache.kafka.common.annotation.InterfaceStability;
 
 /**
- * Options for listTopics.
+ * Options for {@link Admin#listTopics()}.
+ *
+ * The API of this class is evolving, see {@link Admin} for details.
  */
-@InterfaceStability.Unstable
-public class ListTopicsOptions {
-    private Integer timeoutMs = null;
+@InterfaceStability.Evolving
+public class ListTopicsOptions extends AbstractOptions<ListTopicsOptions> {
+
     private boolean listInternal = false;
 
+    /**
+     * Set the timeout in milliseconds for this operation or {@code null} if the default api timeout for the
+     * AdminClient should be used.
+     *
+     */
+    // This method is retained to keep binary compatibility with 0.11
     public ListTopicsOptions timeoutMs(Integer timeoutMs) {
         this.timeoutMs = timeoutMs;
         return this;
-    }
-
-    public Integer timeoutMs() {
-        return timeoutMs;
     }
 
     /**
@@ -48,7 +52,10 @@ public class ListTopicsOptions {
         return this;
     }
 
-    public boolean listInternal() {
+    /**
+     * Return true if we should list internal topics.
+     */
+    public boolean shouldListInternal() {
         return listInternal;
     }
 }

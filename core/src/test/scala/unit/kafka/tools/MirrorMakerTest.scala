@@ -19,13 +19,18 @@ package kafka.tools
 
 import kafka.consumer.BaseConsumerRecord
 import org.apache.kafka.common.record.{RecordBatch, TimestampType}
-import org.junit.Assert._
-import org.junit.Test
 
+import scala.jdk.CollectionConverters._
+import org.junit.jupiter.api.Assertions._
+import org.junit.jupiter.api.Test
+
+import scala.annotation.nowarn
+
+@nowarn("cat=deprecation")
 class MirrorMakerTest {
 
   @Test
-  def testDefaultMirrorMakerMessageHandler() {
+  def testDefaultMirrorMakerMessageHandler(): Unit = {
     val now = 12345L
     val consumerRecord = BaseConsumerRecord("topic", 0, 1L, now, TimestampType.CREATE_TIME, "key".getBytes, "value".getBytes)
 
@@ -41,8 +46,9 @@ class MirrorMakerTest {
   }
 
   @Test
-  def testDefaultMirrorMakerMessageHandlerWithNoTimestampInSourceMessage() {
-    val consumerRecord = BaseConsumerRecord("topic", 0, 1L, RecordBatch.NO_TIMESTAMP, TimestampType.CREATE_TIME, "key".getBytes, "value".getBytes)
+  def testDefaultMirrorMakerMessageHandlerWithNoTimestampInSourceMessage(): Unit = {
+    val consumerRecord = BaseConsumerRecord("topic", 0, 1L, RecordBatch.NO_TIMESTAMP, TimestampType.CREATE_TIME,
+      "key".getBytes, "value".getBytes)
 
     val result = MirrorMaker.defaultMirrorMakerMessageHandler.handle(consumerRecord)
     assertEquals(1, result.size)
@@ -55,4 +61,22 @@ class MirrorMakerTest {
     assertEquals("value", new String(producerRecord.value))
   }
 
+  @Test
+  def testDefaultMirrorMakerMessageHandlerWithHeaders(): Unit = {
+    val now = 12345L
+    val consumerRecord = BaseConsumerRecord("topic", 0, 1L, now, TimestampType.CREATE_TIME, "key".getBytes,
+      "value".getBytes)
+    consumerRecord.headers.add("headerKey", "headerValue".getBytes)
+    val result = MirrorMaker.defaultMirrorMakerMessageHandler.handle(consumerRecord)
+    assertEquals(1, result.size)
+
+    val producerRecord = result.get(0)
+    assertEquals(now, producerRecord.timestamp)
+    assertEquals("topic", producerRecord.topic)
+    assertNull(producerRecord.partition)
+    assertEquals("key", new String(producerRecord.key))
+    assertEquals("value", new String(producerRecord.value))
+    assertEquals("headerValue", new String(producerRecord.headers.lastHeader("headerKey").value))
+    assertEquals(1, producerRecord.headers.asScala.size)
+  }
 }

@@ -57,10 +57,10 @@ object StateChangeLogMerger extends Logging {
   var startDate: Date = null
   var endDate: Date = null
 
-  def main(args: Array[String]) {
+  def main(args: Array[String]): Unit = {
 
     // Parse input arguments.
-    val parser = new OptionParser
+    val parser = new OptionParser(false)
     val filesOpt = parser.accepts("logs", "Comma separated list of state change logs or a regex for the log file names")
                               .withRequiredArg
                               .describedAs("file1,file2,...")
@@ -137,7 +137,7 @@ object StateChangeLogMerger extends Logging {
      */
     val pqueue = new mutable.PriorityQueue[LineIterator]()(dateBasedOrdering)
     val output: OutputStream = new BufferedOutputStream(System.out, 1024*1024)
-    val lineIterators = files.map(io.Source.fromFile(_).getLines)
+    val lineIterators = files.map(scala.io.Source.fromFile(_).getLines())
     var lines: List[LineIterator] = List()
 
     for (itr <- lineIterators) {
@@ -166,19 +166,15 @@ object StateChangeLogMerger extends Logging {
    */
   def getNextLine(itr: Iterator[String]): LineIterator = {
     while (itr != null && itr.hasNext) {
-      val nextLine = itr.next
-      dateRegex.findFirstIn(nextLine) match {
-        case Some(d) =>
-          val date = dateFormat.parse(d)
-          if ((date.equals(startDate) || date.after(startDate)) && (date.equals(endDate) || date.before(endDate))) {
-            topicPartitionRegex.findFirstMatchIn(nextLine) match {
-              case Some(matcher) =>
-                if ((topic == null || topic == matcher.group(1)) && (partitions.isEmpty || partitions.contains(matcher.group(3).toInt)))
-                  return new LineIterator(nextLine, itr)
-              case None =>
-            }
+      val nextLine = itr.next()
+      dateRegex.findFirstIn(nextLine).foreach { d =>
+        val date = dateFormat.parse(d)
+        if ((date.equals(startDate) || date.after(startDate)) && (date.equals(endDate) || date.before(endDate))) {
+          topicPartitionRegex.findFirstMatchIn(nextLine).foreach { matcher =>
+            if ((topic == null || topic == matcher.group(1)) && (partitions.isEmpty || partitions.contains(matcher.group(3).toInt)))
+              return new LineIterator(nextLine, itr)
           }
-        case None =>
+        }
       }
     }
     new LineIterator()

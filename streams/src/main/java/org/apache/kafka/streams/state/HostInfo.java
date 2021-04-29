@@ -16,20 +16,22 @@
  */
 package org.apache.kafka.streams.state;
 
-import org.apache.kafka.common.serialization.Serializer;
+import static org.apache.kafka.common.utils.Utils.getHost;
+import static org.apache.kafka.common.utils.Utils.getPort;
+
+import org.apache.kafka.common.config.ConfigException;
+import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.streams.KafkaStreams;
-import org.apache.kafka.streams.processor.StreamPartitioner;
+import org.apache.kafka.streams.processor.internals.StreamsPartitionAssignor;
 
 /**
  * Represents a user defined endpoint in a {@link org.apache.kafka.streams.KafkaStreams} application.
  * Instances of this class can be obtained by calling one of:
  *  {@link KafkaStreams#allMetadata()}
  *  {@link KafkaStreams#allMetadataForStore(String)}
- *  {@link KafkaStreams#metadataForKey(String, Object, StreamPartitioner)}
- *  {@link KafkaStreams#metadataForKey(String, Object, Serializer)}
  *
  *  The HostInfo is constructed during Partition Assignment
- *  see {@link org.apache.kafka.streams.processor.internals.StreamPartitionAssignor}
+ *  see {@link StreamsPartitionAssignor}
  *  It is extracted from the config {@link org.apache.kafka.streams.StreamsConfig#APPLICATION_SERVER_CONFIG}
  *
  *  If developers wish to expose an endpoint in their KafkaStreams applications they should provide the above
@@ -39,21 +41,50 @@ public class HostInfo {
     private final String host;
     private final int port;
 
-    public HostInfo(String host, int port) {
+    public HostInfo(final String host,
+                    final int port) {
         this.host = host;
         this.port = port;
     }
 
+    /**
+     * @throws ConfigException if the host or port cannot be parsed from the given endpoint string
+     * @return a new HostInfo or null if endPoint is null or has no characters
+     */
+    public static HostInfo buildFromEndpoint(final String endPoint) {
+        if (Utils.isBlank(endPoint)) {
+            return null;
+        }
+
+        final String host = getHost(endPoint);
+        final Integer port = getPort(endPoint);
+
+        if (host == null || port == null) {
+            throw new ConfigException(
+                String.format("Error parsing host address %s. Expected format host:port.", endPoint)
+            );
+        }
+        return new HostInfo(host, port);
+    }
+
+    /**
+     * @return a sentinel for cases where the host metadata is currently unavailable, eg during rebalance operations.
+     */
+    public static HostInfo unavailable() {
+        return new HostInfo("unavailable", -1);
+    }
+
     @Override
-    public boolean equals(Object o) {
-        if (this == o) return true;
-        if (o == null || getClass() != o.getClass()) return false;
+    public boolean equals(final Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
 
-        HostInfo hostInfo = (HostInfo) o;
-
-        if (port != hostInfo.port) return false;
-        return host.equals(hostInfo.host);
-
+        final HostInfo hostInfo = (HostInfo) o;
+        return port == hostInfo.port && host.equals(hostInfo.host);
     }
 
     @Override

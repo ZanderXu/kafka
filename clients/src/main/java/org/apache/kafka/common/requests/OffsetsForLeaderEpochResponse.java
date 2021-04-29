@@ -16,79 +16,64 @@
  */
 package org.apache.kafka.common.requests;
 
-import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.message.OffsetForLeaderEpochResponseData;
 import org.apache.kafka.common.protocol.ApiKeys;
+import org.apache.kafka.common.protocol.ByteBufferAccessor;
 import org.apache.kafka.common.protocol.Errors;
-import org.apache.kafka.common.protocol.types.Struct;
-import org.apache.kafka.common.utils.CollectionUtils;
 
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 
+import static org.apache.kafka.common.record.RecordBatch.NO_PARTITION_LEADER_EPOCH;
+
+/**
+ * Possible error codes:
+ * - {@link Errors#TOPIC_AUTHORIZATION_FAILED} If the user does not have DESCRIBE access to a requested topic
+ * - {@link Errors#REPLICA_NOT_AVAILABLE} If the request is received by a broker with version < 2.6 which is not a replica
+ * - {@link Errors#NOT_LEADER_OR_FOLLOWER} If the broker is not a leader or follower and either the provided leader epoch
+ *     matches the known leader epoch on the broker or is empty
+ * - {@link Errors#FENCED_LEADER_EPOCH} If the epoch is lower than the broker's epoch
+ * - {@link Errors#UNKNOWN_LEADER_EPOCH} If the epoch is larger than the broker's epoch
+ * - {@link Errors#UNKNOWN_TOPIC_OR_PARTITION} If the broker does not have metadata for a topic or partition
+ * - {@link Errors#KAFKA_STORAGE_ERROR} If the log directory for one of the requested partitions is offline
+ * - {@link Errors#UNKNOWN_SERVER_ERROR} For any unexpected errors
+ */
 public class OffsetsForLeaderEpochResponse extends AbstractResponse {
-    public static final String TOPICS = "topics";
-    public static final String TOPIC = "topic";
-    public static final String PARTITIONS = "partitions";
-    public static final String ERROR_CODE = "error_code";
-    public static final String PARTITION_ID = "partition_id";
-    public static final String END_OFFSET = "end_offset";
+    public static final long UNDEFINED_EPOCH_OFFSET = NO_PARTITION_LEADER_EPOCH;
+    public static final int UNDEFINED_EPOCH = NO_PARTITION_LEADER_EPOCH;
 
-    private Map<TopicPartition, EpochEndOffset> epochEndOffsetsByPartition;
+    private final OffsetForLeaderEpochResponseData data;
 
-    public OffsetsForLeaderEpochResponse(Struct struct) {
-        epochEndOffsetsByPartition = new HashMap<>();
-        for (Object topicAndEpocsObj : struct.getArray(TOPICS)) {
-            Struct topicAndEpochs = (Struct) topicAndEpocsObj;
-            String topic = topicAndEpochs.getString(TOPIC);
-            for (Object partitionAndEpochObj : topicAndEpochs.getArray(PARTITIONS)) {
-                Struct partitionAndEpoch = (Struct) partitionAndEpochObj;
-                Errors error = Errors.forCode(partitionAndEpoch.getShort(ERROR_CODE));
-                int partitionId = partitionAndEpoch.getInt(PARTITION_ID);
-                TopicPartition tp = new TopicPartition(topic, partitionId);
-                long endOffset = partitionAndEpoch.getLong(END_OFFSET);
-                epochEndOffsetsByPartition.put(tp, new EpochEndOffset(error, endOffset));
-            }
-        }
-    }
-
-    public OffsetsForLeaderEpochResponse(Map<TopicPartition, EpochEndOffset> epochsByTopic) {
-        this.epochEndOffsetsByPartition = epochsByTopic;
-    }
-
-    public Map<TopicPartition, EpochEndOffset> responses() {
-        return epochEndOffsetsByPartition;
-    }
-
-    public static OffsetsForLeaderEpochResponse parse(ByteBuffer buffer, short versionId) {
-        return new OffsetsForLeaderEpochResponse(ApiKeys.OFFSET_FOR_LEADER_EPOCH.responseSchema(versionId).read(buffer));
+    public OffsetsForLeaderEpochResponse(OffsetForLeaderEpochResponseData data) {
+        super(ApiKeys.OFFSET_FOR_LEADER_EPOCH);
+        this.data = data;
     }
 
     @Override
-    protected Struct toStruct(short version) {
-        Struct responseStruct = new Struct(ApiKeys.OFFSET_FOR_LEADER_EPOCH.responseSchema(version));
+    public OffsetForLeaderEpochResponseData data() {
+        return data;
+    }
 
-        Map<String, Map<Integer, EpochEndOffset>> endOffsetsByTopic = CollectionUtils.groupDataByTopic(epochEndOffsetsByPartition);
+    @Override
+    public Map<Errors, Integer> errorCounts() {
+        Map<Errors, Integer> errorCounts = new HashMap<>();
+        data.topics().forEach(topic ->
+            topic.partitions().forEach(partition ->
+                updateErrorCounts(errorCounts, Errors.forCode(partition.errorCode()))));
+        return errorCounts;
+    }
 
-        List<Struct> topics = new ArrayList<>(endOffsetsByTopic.size());
-        for (Map.Entry<String, Map<Integer, EpochEndOffset>> topicToPartitionEpochs : endOffsetsByTopic.entrySet()) {
-            Struct topicStruct = responseStruct.instance(TOPICS);
-            topicStruct.set(TOPIC, topicToPartitionEpochs.getKey());
-            Map<Integer, EpochEndOffset> partitionEpochs = topicToPartitionEpochs.getValue();
-            List<Struct> partitions = new ArrayList<>();
-            for (Map.Entry<Integer, EpochEndOffset> partitionEndOffset : partitionEpochs.entrySet()) {
-                Struct partitionStruct = topicStruct.instance(PARTITIONS);
-                partitionStruct.set(ERROR_CODE, partitionEndOffset.getValue().error().code());
-                partitionStruct.set(PARTITION_ID, partitionEndOffset.getKey());
-                partitionStruct.set(END_OFFSET, partitionEndOffset.getValue().endOffset());
-                partitions.add(partitionStruct);
-            }
-            topicStruct.set(PARTITIONS, partitions.toArray());
-            topics.add(topicStruct);
-        }
-        responseStruct.set(TOPICS, topics.toArray());
-        return responseStruct;
+    public int throttleTimeMs() {
+        return data.throttleTimeMs();
+    }
+
+    public static OffsetsForLeaderEpochResponse parse(ByteBuffer buffer, short version) {
+        return new OffsetsForLeaderEpochResponse(new OffsetForLeaderEpochResponseData(new ByteBufferAccessor(buffer), version));
+    }
+
+    @Override
+    public String toString() {
+        return data.toString();
     }
 }

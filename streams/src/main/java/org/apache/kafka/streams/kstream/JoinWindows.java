@@ -16,10 +16,14 @@
  */
 package org.apache.kafka.streams.kstream;
 
-import org.apache.kafka.common.annotation.InterfaceStability;
 import org.apache.kafka.streams.processor.TimestampExtractor;
 
+import java.time.Duration;
 import java.util.Map;
+import java.util.Objects;
+
+import static org.apache.kafka.streams.internals.ApiUtils.prepareMillisCheckFailMsgPrefix;
+import static org.apache.kafka.streams.internals.ApiUtils.validateMillisecondDuration;
 
 /**
  * The window specifications used for joins.
@@ -56,14 +60,13 @@ import java.util.Map;
  * @see UnlimitedWindows
  * @see SessionWindows
  * @see KStream#join(KStream, ValueJoiner, JoinWindows)
- * @see KStream#join(KStream, ValueJoiner, JoinWindows, org.apache.kafka.common.serialization.Serde, org.apache.kafka.common.serialization.Serde, org.apache.kafka.common.serialization.Serde)
+ * @see KStream#join(KStream, ValueJoiner, JoinWindows, StreamJoined)
  * @see KStream#leftJoin(KStream, ValueJoiner, JoinWindows)
- * @see KStream#leftJoin(KStream, ValueJoiner, JoinWindows, org.apache.kafka.common.serialization.Serde, org.apache.kafka.common.serialization.Serde, org.apache.kafka.common.serialization.Serde)
+ * @see KStream#leftJoin(KStream, ValueJoiner, JoinWindows, StreamJoined)
  * @see KStream#outerJoin(KStream, ValueJoiner, JoinWindows)
- * @see KStream#outerJoin(KStream, ValueJoiner, JoinWindows)
+ * @see KStream#outerJoin(KStream, ValueJoiner, JoinWindows, StreamJoined)
  * @see TimestampExtractor
  */
-@InterfaceStability.Unstable
 public final class JoinWindows extends Windows<Window> {
 
     /** Maximum time difference for tuples that are before the join tuple. */
@@ -71,52 +74,63 @@ public final class JoinWindows extends Windows<Window> {
     /** Maximum time difference for tuples that are after the join tuple. */
     public final long afterMs;
 
-    private JoinWindows(final long beforeMs, final long afterMs) {
+    private final long graceMs;
+
+    private JoinWindows(final long beforeMs,
+                        final long afterMs,
+                        final long graceMs) {
         if (beforeMs + afterMs < 0) {
             throw new IllegalArgumentException("Window interval (ie, beforeMs+afterMs) must not be negative.");
         }
         this.afterMs = afterMs;
         this.beforeMs = beforeMs;
+        this.graceMs = graceMs;
     }
 
     /**
-     * Specifies that records of the same key are joinable if their timestamps are within {@code timeDifferenceMs},
-     * i.e., the timestamp of a record from the secondary stream is max {@code timeDifferenceMs} earlier or later than
+     * Specifies that records of the same key are joinable if their timestamps are within {@code timeDifference},
+     * i.e., the timestamp of a record from the secondary stream is max {@code timeDifference} earlier or later than
      * the timestamp of the record from the primary stream.
      *
-     * @param timeDifferenceMs join window interval in milliseconds
-     * @throws IllegalArgumentException if {@code timeDifferenceMs} is negative
+     * @param timeDifference join window interval
+     * @throws IllegalArgumentException if {@code timeDifference} is negative or can't be represented as {@code long milliseconds}
      */
-    public static JoinWindows of(final long timeDifferenceMs) throws IllegalArgumentException {
-        return new JoinWindows(timeDifferenceMs, timeDifferenceMs);
+    public static JoinWindows of(final Duration timeDifference) throws IllegalArgumentException {
+        final String msgPrefix = prepareMillisCheckFailMsgPrefix(timeDifference, "timeDifference");
+        final long timeDifferenceMs = validateMillisecondDuration(timeDifference, msgPrefix);
+        return new JoinWindows(timeDifferenceMs, timeDifferenceMs, DEFAULT_GRACE_PERIOD_MS);
     }
 
     /**
-     * Changes the start window boundary to {@code timeDifferenceMs} but keep the end window boundary as is.
+     * Changes the start window boundary to {@code timeDifference} but keep the end window boundary as is.
      * Thus, records of the same key are joinable if the timestamp of a record from the secondary stream is at most
-     * {@code timeDifferenceMs} earlier than the timestamp of the record from the primary stream.
-     * {@code timeDifferenceMs} can be negative but it's absolute value must not be larger than current window "after"
+     * {@code timeDifference} earlier than the timestamp of the record from the primary stream.
+     * {@code timeDifference} can be negative but its absolute value must not be larger than current window "after"
      * value (which would result in a negative window size).
      *
-     * @param timeDifferenceMs relative window start time in milliseconds
-     * @throws IllegalArgumentException if the resulting window size is negative
+     * @param timeDifference relative window start time
+     * @throws IllegalArgumentException if the resulting window size is negative or {@code timeDifference} can't be represented as {@code long milliseconds}
      */
-    public JoinWindows before(final long timeDifferenceMs) throws IllegalArgumentException {
-        return new JoinWindows(timeDifferenceMs, afterMs);
+    public JoinWindows before(final Duration timeDifference) throws IllegalArgumentException {
+        final String msgPrefix = prepareMillisCheckFailMsgPrefix(timeDifference, "timeDifference");
+        final long timeDifferenceMs = validateMillisecondDuration(timeDifference, msgPrefix);
+        return new JoinWindows(timeDifferenceMs, afterMs, DEFAULT_GRACE_PERIOD_MS);
     }
 
     /**
-     * Changes the end window boundary to {@code timeDifferenceMs} but keep the start window boundary as is.
+     * Changes the end window boundary to {@code timeDifference} but keep the start window boundary as is.
      * Thus, records of the same key are joinable if the timestamp of a record from the secondary stream is at most
-     * {@code timeDifferenceMs} later than the timestamp of the record from the primary stream.
-     * {@code timeDifferenceMs} can be negative but it's absolute value must not be larger than current window "before"
+     * {@code timeDifference} later than the timestamp of the record from the primary stream.
+     * {@code timeDifference} can be negative but its absolute value must not be larger than current window "before"
      * value (which would result in a negative window size).
      *
-     * @param timeDifferenceMs relative window end time in milliseconds
-     * @throws IllegalArgumentException if the resulting window size is negative
+     * @param timeDifference relative window end time
+     * @throws IllegalArgumentException if the resulting window size is negative or {@code timeDifference} can't be represented as {@code long milliseconds}
      */
-    public JoinWindows after(final long timeDifferenceMs) throws IllegalArgumentException {
-        return new JoinWindows(beforeMs, timeDifferenceMs);
+    public JoinWindows after(final Duration timeDifference) throws IllegalArgumentException {
+        final String msgPrefix = prepareMillisCheckFailMsgPrefix(timeDifference, "timeDifference");
+        final long timeDifferenceMs = validateMillisecondDuration(timeDifference, msgPrefix);
+        return new JoinWindows(beforeMs, timeDifferenceMs, DEFAULT_GRACE_PERIOD_MS);
     }
 
     /**
@@ -136,49 +150,54 @@ public final class JoinWindows extends Windows<Window> {
     }
 
     /**
-     * @param durationMs the window retention time in milliseconds
-     * @return itself
-     * @throws IllegalArgumentException if {@code durationMs} is smaller than the window size
-     */
-    @Override
-    public JoinWindows until(final long durationMs) throws IllegalArgumentException {
-        if (durationMs < size()) {
-            throw new IllegalArgumentException("Window retention time (durationMs) cannot be smaller than the window size.");
-        }
-        super.until(durationMs);
-        return this;
-    }
-
-    /**
-     * {@inheritDoc}
+     * Reject out-of-order events that are delayed more than {@code afterWindowEnd}
+     * after the end of its window.
      * <p>
-     * For {@link TimeWindows} the maintain duration is at least as small as the window size.
+     * Delay is defined as (stream_time - record_timestamp).
      *
-     * @return the window maintain duration
+     * @param afterWindowEnd The grace period to admit out-of-order events to a window.
+     * @return this updated builder
+     * @throws IllegalArgumentException if the {@code afterWindowEnd} is negative of can't be represented as {@code long milliseconds}
      */
-    @Override
-    public long maintainMs() {
-        return Math.max(super.maintainMs(), size());
+    public JoinWindows grace(final Duration afterWindowEnd) throws IllegalArgumentException {
+        final String msgPrefix = prepareMillisCheckFailMsgPrefix(afterWindowEnd, "afterWindowEnd");
+        final long afterWindowEndMs = validateMillisecondDuration(afterWindowEnd, msgPrefix);
+        if (afterWindowEndMs < 0) {
+            throw new IllegalArgumentException("Grace period must not be negative.");
+        }
+        return new JoinWindows(beforeMs, afterMs, afterWindowEndMs);
     }
 
     @Override
-    public final boolean equals(final Object o) {
-        if (o == this) {
+    public long gracePeriodMs() {
+        return graceMs;
+    }
+
+    @Override
+    public boolean equals(final Object o) {
+        if (this == o) {
             return true;
         }
-        if (!(o instanceof JoinWindows)) {
+        if (o == null || getClass() != o.getClass()) {
             return false;
         }
-
-        final JoinWindows other = (JoinWindows) o;
-        return beforeMs == other.beforeMs && afterMs == other.afterMs;
+        final JoinWindows that = (JoinWindows) o;
+        return beforeMs == that.beforeMs &&
+            afterMs == that.afterMs &&
+            graceMs == that.graceMs;
     }
 
     @Override
     public int hashCode() {
-        int result = (int) (beforeMs ^ (beforeMs >>> 32));
-        result = 31 * result + (int) (afterMs ^ (afterMs >>> 32));
-        return result;
+        return Objects.hash(beforeMs, afterMs, graceMs);
     }
 
+    @Override
+    public String toString() {
+        return "JoinWindows{" +
+            "beforeMs=" + beforeMs +
+            ", afterMs=" + afterMs +
+            ", graceMs=" + graceMs +
+            '}';
+    }
 }

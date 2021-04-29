@@ -16,29 +16,49 @@
  */
 package org.apache.kafka.common.utils;
 
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.Timeout;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assume.assumeTrue;
+import java.io.IOException;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+@Timeout(180)
+@DisabledOnOs(OS.WINDOWS)
 public class ShellTest {
-    @Rule
-    public final Timeout globalTimeout = Timeout.seconds(180);
 
     @Test
     public void testEchoHello() throws Exception {
-        assumeTrue(!OperatingSystem.IS_WINDOWS);
         String output = Shell.execCommand("echo", "hello");
         assertEquals("hello\n", output);
     }
 
     @Test
     public void testHeadDevZero() throws Exception {
-        assumeTrue(!OperatingSystem.IS_WINDOWS);
         final int length = 100000;
         String output = Shell.execCommand("head", "-c", Integer.toString(length), "/dev/zero");
         assertEquals(length, output.length());
+    }
+
+    private final static String NONEXISTENT_PATH = "/dev/a/path/that/does/not/exist/in/the/filesystem";
+
+    @Test
+    public void testAttemptToRunNonExistentProgram() {
+        IOException e = assertThrows(IOException.class, () -> Shell.execCommand(NONEXISTENT_PATH),
+                "Expected to get an exception when trying to run a program that does not exist");
+        assertTrue(e.getMessage().contains("No such file"), "Unexpected error message '" + e.getMessage() + "'");
+    }
+
+    @Test
+    public void testRunProgramWithErrorReturn() {
+        Shell.ExitCodeException e = assertThrows(Shell.ExitCodeException.class,
+            () -> Shell.execCommand("head", "-c", "0", NONEXISTENT_PATH));
+        String message = e.getMessage();
+        assertTrue(message.contains("No such file") || message.contains("illegal byte count"),
+            "Unexpected error message '" + message + "'");
     }
 }

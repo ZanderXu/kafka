@@ -19,18 +19,24 @@ package org.apache.kafka.connect.transforms;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.sink.SinkRecord;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
 
 import java.util.Collections;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 public class HoistFieldTest {
+    private final HoistField<SinkRecord> xform = new HoistField.Key<>();
+
+    @AfterEach
+    public void teardown() {
+        xform.close();
+    }
 
     @Test
     public void schemaless() {
-        final HoistField<SinkRecord> xform = new HoistField.Key<>();
         xform.configure(Collections.singletonMap("field", "magic"));
 
         final SinkRecord record = new SinkRecord("test", 0, null, 42, null, null, 0);
@@ -42,7 +48,6 @@ public class HoistFieldTest {
 
     @Test
     public void withSchema() {
-        final HoistField<SinkRecord> xform = new HoistField.Key<>();
         xform.configure(Collections.singletonMap("field", "magic"));
 
         final SinkRecord record = new SinkRecord("test", 0, Schema.INT32_SCHEMA, 42, null, null, 0);

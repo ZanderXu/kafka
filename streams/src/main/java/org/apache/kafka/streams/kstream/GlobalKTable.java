@@ -16,9 +16,9 @@
  */
 package org.apache.kafka.streams.kstream;
 
-import org.apache.kafka.common.annotation.InterfaceStability;
 import org.apache.kafka.streams.KafkaStreams;
 import org.apache.kafka.streams.KeyValue;
+import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.state.ReadOnlyKeyValueStore;
 
 /**
@@ -35,7 +35,7 @@ import org.apache.kafka.streams.state.ReadOnlyKeyValueStore;
  * All joins with the {@code GlobalKTable} require that a {@link KeyValueMapper} is provided that can map from the
  * {@link KeyValue} of the left hand side {@link KStream} to the key of the right hand side {@code GlobalKTable}.
  * <p>
- * A {@code GlobalKTable} is created via a {@link KStreamBuilder}. For example:
+ * A {@code GlobalKTable} is created via a {@link StreamsBuilder}. For example:
  * <pre>{@code
  * builder.globalTable("topic-name", "queryable-store-name");
  * }</pre>
@@ -49,7 +49,7 @@ import org.apache.kafka.streams.state.ReadOnlyKeyValueStore;
  * final KafkaStreams streams = ...;
  * streams.start()
  * ...
- * ReadOnlyKeyValueStore view = streams.store("g1-store", QueryableStoreTypes.keyValueStore());
+ * ReadOnlyKeyValueStore view = streams.store("g1-store", QueryableStoreTypes.timestampedKeyValueStore());
  * view.get(key); // can be done on any key, as all keys are present
  *}</pre>
  * Note that in contrast to {@link KTable} a {@code GlobalKTable}'s state holds a full copy of the underlying topic,
@@ -60,10 +60,15 @@ import org.apache.kafka.streams.state.ReadOnlyKeyValueStore;
  * @param <K> Type of primary keys
  * @param <V> Type of value changes
  * @see KTable
- * @see KStreamBuilder#globalTable(String, String)
+ * @see StreamsBuilder#globalTable(String)
  * @see KStream#join(GlobalKTable, KeyValueMapper, ValueJoiner)
  * @see KStream#leftJoin(GlobalKTable, KeyValueMapper, ValueJoiner)
  */
-@InterfaceStability.Unstable
 public interface GlobalKTable<K, V> {
+    /**
+     * Get the name of the local state store that can be used to query this {@code GlobalKTable}.
+     *
+     * @return the underlying state store name, or {@code null} if this {@code GlobalKTable} cannot be queried.
+     */
+    String queryableStoreName();
 }

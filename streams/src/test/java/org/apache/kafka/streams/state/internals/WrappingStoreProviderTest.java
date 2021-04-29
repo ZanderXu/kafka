@@ -17,10 +17,13 @@
 package org.apache.kafka.streams.state.internals;
 
 
+import org.apache.kafka.common.serialization.Serdes;
+import org.apache.kafka.streams.StoreQueryParameters;
 import org.apache.kafka.streams.errors.InvalidStateStoreException;
 import org.apache.kafka.streams.state.NoOpWindowStore;
 import org.apache.kafka.streams.state.QueryableStoreTypes;
 import org.apache.kafka.streams.state.ReadOnlyKeyValueStore;
+import org.apache.kafka.streams.state.Stores;
 import org.apache.kafka.streams.state.ReadOnlyWindowStore;
 import org.apache.kafka.test.StateStoreProviderStub;
 import org.junit.Before;
@@ -31,43 +34,67 @@ import java.util.List;
 
 import static org.apache.kafka.streams.state.QueryableStoreTypes.windowStore;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertThrows;
 
 public class WrappingStoreProviderTest {
 
     private WrappingStoreProvider wrappingStoreProvider;
+
+    private final int numStateStorePartitions = 2;
 
     @Before
     public void before() {
         final StateStoreProviderStub stubProviderOne = new StateStoreProviderStub(false);
         final StateStoreProviderStub stubProviderTwo = new StateStoreProviderStub(false);
 
-
-        stubProviderOne.addStore("kv", StateStoreTestUtils.newKeyValueStore("kv", "app-id", String.class, String.class));
-        stubProviderOne.addStore("window", new NoOpWindowStore());
-        stubProviderTwo.addStore("kv", StateStoreTestUtils.newKeyValueStore("kv", "app-id", String.class, String.class));
-        stubProviderTwo.addStore("window", new NoOpWindowStore());
-
-        wrappingStoreProvider = new WrappingStoreProvider(
-                Arrays.<StateStoreProvider>asList(stubProviderOne, stubProviderTwo));
+        for (int partition = 0; partition < numStateStorePartitions; partition++) {
+            stubProviderOne.addStore("kv", partition, Stores.keyValueStoreBuilder(Stores.inMemoryKeyValueStore("kv"),
+                    Serdes.serdeFrom(String.class),
+                    Serdes.serdeFrom(String.class))
+                    .build());
+            stubProviderOne.addStore("window", partition, new NoOpWindowStore());
+            wrappingStoreProvider = new WrappingStoreProvider(
+                    Arrays.asList(stubProviderOne, stubProviderTwo),
+                    StoreQueryParameters.fromNameAndType("kv", QueryableStoreTypes.keyValueStore())
+            );
+        }
     }
 
     @Test
-    public void shouldFindKeyValueStores() throws Exception {
-        List<ReadOnlyKeyValueStore<String, String>> results =
+    public void shouldFindKeyValueStores() {
+        final List<ReadOnlyKeyValueStore<String, String>> results =
                 wrappingStoreProvider.stores("kv", QueryableStoreTypes.<String, String>keyValueStore());
         assertEquals(2, results.size());
     }
 
     @Test
-    public void shouldFindWindowStores() throws Exception {
+    public void shouldFindWindowStores() {
+        wrappingStoreProvider.setStoreQueryParameters(StoreQueryParameters.fromNameAndType("window", windowStore()));
         final List<ReadOnlyWindowStore<Object, Object>>
                 windowStores =
                 wrappingStoreProvider.stores("window", windowStore());
         assertEquals(2, windowStores.size());
     }
 
-    @Test(expected = InvalidStateStoreException.class)
-    public void shouldThrowInvalidStoreExceptionIfNoStoreOfTypeFound() throws Exception {
-        wrappingStoreProvider.stores("doesn't exist", QueryableStoreTypes.keyValueStore());
+    @Test
+    public void shouldThrowInvalidStoreExceptionIfNoStoreOfTypeFound() {
+        wrappingStoreProvider.setStoreQueryParameters(StoreQueryParameters.fromNameAndType("doesn't exist", QueryableStoreTypes.<String, String>keyValueStore()));
+        assertThrows(InvalidStateStoreException.class, () -> wrappingStoreProvider.stores("doesn't exist", QueryableStoreTypes.<String, String>keyValueStore()));
+    }
+
+    @Test
+    public void shouldReturnAllStoreWhenQueryWithoutPartition() {
+        wrappingStoreProvider.setStoreQueryParameters(StoreQueryParameters.fromNameAndType("kv", QueryableStoreTypes.<String, String>keyValueStore()));
+        final List<ReadOnlyKeyValueStore<String, String>> results =
+                wrappingStoreProvider.stores("kv", QueryableStoreTypes.<String, String>keyValueStore());
+        assertEquals(numStateStorePartitions, results.size());
+    }
+
+    @Test
+    public void shouldReturnSingleStoreWhenQueryWithPartition() {
+        wrappingStoreProvider.setStoreQueryParameters(StoreQueryParameters.fromNameAndType("kv", QueryableStoreTypes.<String, String>keyValueStore()).withPartition(numStateStorePartitions - 1));
+        final List<ReadOnlyKeyValueStore<String, String>> results =
+                wrappingStoreProvider.stores("kv", QueryableStoreTypes.<String, String>keyValueStore());
+        assertEquals(1, results.size());
     }
 }

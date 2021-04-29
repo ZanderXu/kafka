@@ -28,7 +28,7 @@ import kafka.utils._
 import org.apache.kafka.common.utils.Time
 
 import scala.math._
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 
 /**
  * This is a benchmark test of the purgatory.
@@ -36,7 +36,7 @@ import scala.collection.JavaConverters._
 object TestPurgatoryPerformance {
 
   def main(args: Array[String]): Unit = {
-    val parser = new OptionParser
+    val parser = new OptionParser(false)
     val keySpaceSizeOpt = parser.accepts("key-space-size", "The total number of possible keys")
       .withRequiredArg
       .describedAs("total_num_possible_keys")

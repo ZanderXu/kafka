@@ -23,11 +23,12 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
+import org.apache.kafka.clients.producer.BufferExhaustedException;
+import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.MetricName;
-import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.metrics.Sensor;
-import org.apache.kafka.common.metrics.stats.Rate;
+import org.apache.kafka.common.metrics.stats.Meter;
 import org.apache.kafka.common.utils.Time;
 
 
@@ -50,11 +51,12 @@ public class BufferPool {
     private final ReentrantLock lock;
     private final Deque<ByteBuffer> free;
     private final Deque<Condition> waiters;
-    /** This memory is accounted for separately from the poolable buffers in free. */
-    private long availableMemory;
+    /** Total available memory is the sum of nonPooledAvailableMemory and the number of byte buffers in free * poolableSize.  */
+    private long nonPooledAvailableMemory;
     private final Metrics metrics;
     private final Time time;
     private final Sensor waitTime;
+    private boolean closed;
 
     /**
      * Create a new buffer pool
@@ -71,14 +73,24 @@ public class BufferPool {
         this.free = new ArrayDeque<>();
         this.waiters = new ArrayDeque<>();
         this.totalMemory = memory;
-        this.availableMemory = memory;
+        this.nonPooledAvailableMemory = memory;
         this.metrics = metrics;
         this.time = time;
         this.waitTime = this.metrics.sensor(WAIT_TIME_SENSOR_NAME);
-        MetricName metricName = metrics.metricName("bufferpool-wait-ratio",
+        MetricName rateMetricName = metrics.metricName("bufferpool-wait-ratio",
                                                    metricGrpName,
                                                    "The fraction of time an appender waits for space allocation.");
-        this.waitTime.add(metricName, new Rate(TimeUnit.NANOSECONDS));
+        MetricName totalMetricName = metrics.metricName("bufferpool-wait-time-total",
+                                                   metricGrpName,
+                                                   "The total time an appender waits for space allocation.");
+
+        Sensor bufferExhaustedRecordSensor = metrics.sensor("buffer-exhausted-records");
+        MetricName bufferExhaustedRateMetricName = metrics.metricName("buffer-exhausted-rate", metricGrpName, "The average per-second number of record sends that are dropped due to buffer exhaustion");
+        MetricName bufferExhaustedTotalMetricName = metrics.metricName("buffer-exhausted-total", metricGrpName, "The total number of record sends that are dropped due to buffer exhaustion");
+        bufferExhaustedRecordSensor.add(new Meter(bufferExhaustedRateMetricName, bufferExhaustedTotalMetricName));
+
+        this.waitTime.add(new Meter(TimeUnit.NANOSECONDS, rateMetricName, totalMetricName));
+        this.closed = false;
     }
 
     /**
@@ -99,7 +111,14 @@ public class BufferPool {
                                                + this.totalMemory
                                                + " on memory allocations.");
 
+        ByteBuffer buffer = null;
         this.lock.lock();
+
+        if (this.closed) {
+            this.lock.unlock();
+            throw new KafkaException("Producer closed while allocating memory");
+        }
+
         try {
             // check if we have a free buffer of the right size pooled
             if (size == poolableSize && !this.free.isEmpty())
@@ -108,18 +127,14 @@ public class BufferPool {
             // now check if the request is immediately satisfiable with the
             // memory on hand or if we need to block
             int freeListSize = freeSize() * this.poolableSize;
-            if (this.availableMemory + freeListSize >= size) {
+            if (this.nonPooledAvailableMemory + freeListSize >= size) {
                 // we have enough unallocated or pooled memory to immediately
-                // satisfy the request
+                // satisfy the request, but need to allocate the buffer
                 freeUp(size);
-                ByteBuffer allocatedBuffer = allocateByteBuffer(size);
-                this.availableMemory -= size;
-                return allocatedBuffer;
+                this.nonPooledAvailableMemory -= size;
             } else {
                 // we are out of memory and will have to block
                 int accumulated = 0;
-                ByteBuffer buffer = null;
-                boolean hasError = true;
                 Condition moreMemory = this.lock.newCondition();
                 try {
                     long remainingTimeToBlockNs = TimeUnit.MILLISECONDS.toNanos(maxTimeToBlockMs);
@@ -135,11 +150,15 @@ public class BufferPool {
                         } finally {
                             long endWaitNs = time.nanoseconds();
                             timeNs = Math.max(0L, endWaitNs - startWaitNs);
-                            this.waitTime.record(timeNs, time.milliseconds());
+                            recordWaitTime(timeNs);
                         }
 
+                        if (this.closed)
+                            throw new KafkaException("Producer closed while allocating memory");
+
                         if (waitingTimeElapsed) {
-                            throw new TimeoutException("Failed to allocate memory within the configured max blocking time " + maxTimeToBlockMs + " ms.");
+                            this.metrics.sensor("buffer-exhausted-records").record();
+                            throw new BufferExhaustedException("Failed to allocate memory within the configured max blocking time " + maxTimeToBlockMs + " ms.");
                         }
 
                         remainingTimeToBlockNs -= timeNs;
@@ -154,21 +173,16 @@ public class BufferPool {
                             // we'll need to allocate memory, but we may only get
                             // part of what we need on this iteration
                             freeUp(size - accumulated);
-                            int got = (int) Math.min(size - accumulated, this.availableMemory);
-                            this.availableMemory -= got;
+                            int got = (int) Math.min(size - accumulated, this.nonPooledAvailableMemory);
+                            this.nonPooledAvailableMemory -= got;
                             accumulated += got;
                         }
                     }
-
-                    if (buffer == null)
-                        buffer = allocateByteBuffer(size);
-                    hasError = false;
-                    //unlock happens in top-level, enclosing finally
-                    return buffer;
+                    // Don't reclaim memory on throwable since nothing was thrown
+                    accumulated = 0;
                 } finally {
                     // When this loop was not able to successfully terminate don't loose available memory
-                    if (hasError)
-                        this.availableMemory += accumulated;
+                    this.nonPooledAvailableMemory += accumulated;
                     this.waiters.remove(moreMemory);
                 }
             }
@@ -176,11 +190,45 @@ public class BufferPool {
             // signal any additional waiters if there is more memory left
             // over for them
             try {
-                if (!(this.availableMemory == 0 && this.free.isEmpty()) && !this.waiters.isEmpty())
+                if (!(this.nonPooledAvailableMemory == 0 && this.free.isEmpty()) && !this.waiters.isEmpty())
                     this.waiters.peekFirst().signal();
             } finally {
                 // Another finally... otherwise find bugs complains
                 lock.unlock();
+            }
+        }
+
+        if (buffer == null)
+            return safeAllocateByteBuffer(size);
+        else
+            return buffer;
+    }
+
+    // Protected for testing
+    protected void recordWaitTime(long timeNs) {
+        this.waitTime.record(timeNs, time.milliseconds());
+    }
+
+    /**
+     * Allocate a buffer.  If buffer allocation fails (e.g. because of OOM) then return the size count back to
+     * available memory and signal the next waiter if it exists.
+     */
+    private ByteBuffer safeAllocateByteBuffer(int size) {
+        boolean error = true;
+        try {
+            ByteBuffer buffer = allocateByteBuffer(size);
+            error = false;
+            return buffer;
+        } finally {
+            if (error) {
+                this.lock.lock();
+                try {
+                    this.nonPooledAvailableMemory += size;
+                    if (!this.waiters.isEmpty())
+                        this.waiters.peekFirst().signal();
+                } finally {
+                    this.lock.unlock();
+                }
             }
         }
     }
@@ -195,8 +243,8 @@ public class BufferPool {
      * buffers (if needed)
      */
     private void freeUp(int size) {
-        while (!this.free.isEmpty() && this.availableMemory < size)
-            this.availableMemory += this.free.pollLast().capacity();
+        while (!this.free.isEmpty() && this.nonPooledAvailableMemory < size)
+            this.nonPooledAvailableMemory += this.free.pollLast().capacity();
     }
 
     /**
@@ -214,7 +262,7 @@ public class BufferPool {
                 buffer.clear();
                 this.free.add(buffer);
             } else {
-                this.availableMemory += size;
+                this.nonPooledAvailableMemory += size;
             }
             Condition moreMem = this.waiters.peekFirst();
             if (moreMem != null)
@@ -234,7 +282,7 @@ public class BufferPool {
     public long availableMemory() {
         lock.lock();
         try {
-            return this.availableMemory + freeSize() * (long) this.poolableSize;
+            return this.nonPooledAvailableMemory + freeSize() * (long) this.poolableSize;
         } finally {
             lock.unlock();
         }
@@ -251,7 +299,7 @@ public class BufferPool {
     public long unallocatedMemory() {
         lock.lock();
         try {
-            return this.availableMemory;
+            return this.nonPooledAvailableMemory;
         } finally {
             lock.unlock();
         }
@@ -286,5 +334,20 @@ public class BufferPool {
     // package-private method used only for testing
     Deque<Condition> waiters() {
         return this.waiters;
+    }
+
+    /**
+     * Closes the buffer pool. Memory will be prevented from being allocated, but may be deallocated. All allocations
+     * awaiting available memory will be notified to abort.
+     */
+    public void close() {
+        this.lock.lock();
+        this.closed = true;
+        try {
+            for (Condition waiter : this.waiters)
+                waiter.signal();
+        } finally {
+            this.lock.unlock();
+        }
     }
 }

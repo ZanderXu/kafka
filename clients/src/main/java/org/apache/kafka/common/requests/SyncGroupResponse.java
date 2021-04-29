@@ -16,72 +16,53 @@
  */
 package org.apache.kafka.common.requests;
 
+import org.apache.kafka.common.message.SyncGroupResponseData;
 import org.apache.kafka.common.protocol.ApiKeys;
+import org.apache.kafka.common.protocol.ByteBufferAccessor;
 import org.apache.kafka.common.protocol.Errors;
-import org.apache.kafka.common.protocol.types.Struct;
 
 import java.nio.ByteBuffer;
+import java.util.Map;
 
 public class SyncGroupResponse extends AbstractResponse {
 
-    public static final String ERROR_CODE_KEY_NAME = "error_code";
-    public static final String MEMBER_ASSIGNMENT_KEY_NAME = "member_assignment";
+    private final SyncGroupResponseData data;
 
-    /**
-     * Possible error codes:
-     *
-     * GROUP_COORDINATOR_NOT_AVAILABLE (15)
-     * NOT_COORDINATOR (16)
-     * ILLEGAL_GENERATION (22)
-     * UNKNOWN_MEMBER_ID (25)
-     * REBALANCE_IN_PROGRESS (27)
-     * GROUP_AUTHORIZATION_FAILED (30)
-     */
-
-    private final Errors error;
-    private final int throttleTimeMs;
-    private final ByteBuffer memberState;
-
-    public SyncGroupResponse(Errors error, ByteBuffer memberState) {
-        this(DEFAULT_THROTTLE_TIME, error, memberState);
-    }
-
-    public SyncGroupResponse(int throttleTimeMs, Errors error, ByteBuffer memberState) {
-        this.throttleTimeMs = throttleTimeMs;
-        this.error = error;
-        this.memberState = memberState;
-    }
-
-    public SyncGroupResponse(Struct struct) {
-        this.throttleTimeMs = struct.hasField(THROTTLE_TIME_KEY_NAME) ? struct.getInt(THROTTLE_TIME_KEY_NAME) : DEFAULT_THROTTLE_TIME;
-        this.error = Errors.forCode(struct.getShort(ERROR_CODE_KEY_NAME));
-        this.memberState = struct.getBytes(MEMBER_ASSIGNMENT_KEY_NAME);
-    }
-
-    public int throttleTimeMs() {
-        return throttleTimeMs;
-    }
-
-    public Errors error() {
-        return error;
-    }
-
-    public ByteBuffer memberAssignment() {
-        return memberState;
+    public SyncGroupResponse(SyncGroupResponseData data) {
+        super(ApiKeys.SYNC_GROUP);
+        this.data = data;
     }
 
     @Override
-    protected Struct toStruct(short version) {
-        Struct struct = new Struct(ApiKeys.SYNC_GROUP.responseSchema(version));
-        if (struct.hasField(THROTTLE_TIME_KEY_NAME))
-            struct.set(THROTTLE_TIME_KEY_NAME, throttleTimeMs);
-        struct.set(ERROR_CODE_KEY_NAME, error.code());
-        struct.set(MEMBER_ASSIGNMENT_KEY_NAME, memberState);
-        return struct;
+    public int throttleTimeMs() {
+        return data.throttleTimeMs();
+    }
+
+    public Errors error() {
+        return Errors.forCode(data.errorCode());
+    }
+
+    @Override
+    public Map<Errors, Integer> errorCounts() {
+        return errorCounts(Errors.forCode(data.errorCode()));
+    }
+
+    @Override
+    public SyncGroupResponseData data() {
+        return data;
+    }
+
+    @Override
+    public String toString() {
+        return data.toString();
     }
 
     public static SyncGroupResponse parse(ByteBuffer buffer, short version) {
-        return new SyncGroupResponse(ApiKeys.SYNC_GROUP.parseResponse(version, buffer));
+        return new SyncGroupResponse(new SyncGroupResponseData(new ByteBufferAccessor(buffer), version));
     }
 
+    @Override
+    public boolean shouldClientThrottle(short version) {
+        return version >= 2;
+    }
 }

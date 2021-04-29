@@ -16,6 +16,10 @@
  */
 package org.apache.kafka.common.record;
 
+import org.apache.kafka.common.utils.BufferSupplier;
+import org.apache.kafka.common.utils.ByteBufferOutputStream;
+import org.apache.kafka.common.utils.CloseableIterator;
+
 /**
  * A mutable record batch is one that can be modified in place (without copying). This is used by the broker
  * to override certain fields in the batch before appending it to the log.
@@ -30,8 +34,12 @@ public interface MutableRecordBatch extends RecordBatch {
 
     /**
      * Set the max timestamp for this batch. When using log append time, this effectively overrides the individual
-     * timestamps of all the records contained in the batch. Note that this typically requires re-computation
-     * of the batch's CRC.
+     * timestamps of all the records contained in the batch. To avoid recompression, the record fields are not updated
+     * by this method, but clients ignore them if the timestamp time is log append time. Note that firstTimestamp is not
+     * updated by this method.
+     *
+     * This typically requires re-computation of the batch's CRC.
+     *
      * @param timestampType The timestamp type
      * @param maxTimestamp The maximum timestamp
      */
@@ -42,4 +50,19 @@ public interface MutableRecordBatch extends RecordBatch {
      * @param epoch The partition leader epoch to use
      */
     void setPartitionLeaderEpoch(int epoch);
+
+    /**
+     * Write this record batch into an output stream.
+     * @param outputStream The buffer to write the batch to
+     */
+    void writeTo(ByteBufferOutputStream outputStream);
+
+    /**
+     * Return an iterator which skips parsing key, value and headers from the record stream, and therefore the resulted
+     * {@code org.apache.kafka.common.record.Record}'s key and value fields would be empty. This iterator is used
+     * when the read record's key and value are not needed and hence can save some byte buffer allocating / GC overhead.
+     *
+     * @return The closeable iterator
+     */
+    CloseableIterator<Record> skipKeyValueIterator(BufferSupplier bufferSupplier);
 }

@@ -20,10 +20,9 @@ from ducktape.mark import matrix
 from ducktape.mark.resource import cluster
 
 from kafkatest.services.zookeeper import ZookeeperService
-from kafkatest.services.kafka import KafkaService
+from kafkatest.services.kafka import KafkaService, quorum
 from kafkatest.services.console_consumer import ConsoleConsumer
 from kafkatest.services.kafka_log4j_appender import KafkaLog4jAppender
-from kafkatest.services.security.security_config import SecurityConfig
 
 TOPIC = "topic-log4j-appender"
 MAX_MESSAGES = 100
@@ -42,16 +41,18 @@ class Log4jAppenderTest(Test):
             TOPIC: {'partitions': 1, 'replication-factor': 1}
         }
 
-        self.zk = ZookeeperService(test_context, self.num_zk)
+        self.zk = ZookeeperService(test_context, self.num_zk) if quorum.for_test(test_context) == quorum.zk else None
 
     def setUp(self):
-        self.zk.start()
+        if self.zk:
+            self.zk.start()
 
     def start_kafka(self, security_protocol, interbroker_security_protocol):
         self.kafka = KafkaService(
             self.test_context, self.num_brokers,
             self.zk, security_protocol=security_protocol,
-            interbroker_security_protocol=interbroker_security_protocol, topics=self.topics)
+            interbroker_security_protocol=interbroker_security_protocol, topics=self.topics,
+            controller_num_nodes_override=self.num_zk)
         self.kafka.start()
 
     def start_appender(self, security_protocol):
@@ -64,18 +65,17 @@ class Log4jAppenderTest(Test):
             self.logger.debug("Received message: %s" % msg)
             self.messages_received_count += 1
 
-    def start_consumer(self, security_protocol):
-        enable_new_consumer = security_protocol != SecurityConfig.PLAINTEXT
+    def start_consumer(self):
         self.consumer = ConsoleConsumer(self.test_context, num_nodes=self.num_brokers, kafka=self.kafka, topic=TOPIC,
-                                        consumer_timeout_ms=1000, new_consumer=enable_new_consumer,
+                                        consumer_timeout_ms=10000,
                                         message_validator=self.custom_message_validator)
         self.consumer.start()
 
     @cluster(num_nodes=4)
-    @matrix(security_protocol=['PLAINTEXT', 'SSL'])
+    @matrix(security_protocol=['PLAINTEXT', 'SSL'], metadata_quorum=quorum.all_non_upgrade)
     @cluster(num_nodes=5)
-    @matrix(security_protocol=['SASL_PLAINTEXT', 'SASL_SSL'])
-    def test_log4j_appender(self, security_protocol='PLAINTEXT'):
+    @matrix(security_protocol=['SASL_PLAINTEXT', 'SASL_SSL'], metadata_quorum=quorum.all_non_upgrade)
+    def test_log4j_appender(self, security_protocol='PLAINTEXT', metadata_quorum=quorum.zk):
         """
         Tests if KafkaLog4jAppender is producing to Kafka topic
         :return: None
@@ -84,11 +84,11 @@ class Log4jAppenderTest(Test):
         self.start_appender(security_protocol)
         self.appender.wait()
 
-        self.start_consumer(security_protocol)
+        self.start_consumer()
         node = self.consumer.nodes[0]
 
         wait_until(lambda: self.consumer.alive(node),
-            timeout_sec=10, backoff_sec=.2, err_msg="Consumer was too slow to start")
+            timeout_sec=20, backoff_sec=.2, err_msg="Consumer was too slow to start")
 
         # Verify consumed messages count
         wait_until(lambda: self.messages_received_count == MAX_MESSAGES, timeout_sec=10,

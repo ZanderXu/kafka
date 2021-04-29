@@ -17,6 +17,7 @@
 package org.apache.kafka.streams.state.internals;
 
 import org.apache.kafka.common.utils.Bytes;
+import org.apache.kafka.streams.errors.InvalidStateStoreException;
 import org.apache.kafka.streams.processor.StateStore;
 import org.apache.kafka.streams.state.KeyValueIterator;
 
@@ -40,6 +41,16 @@ public interface SegmentedBytesStore extends StateStore {
     KeyValueIterator<Bytes, byte[]> fetch(final Bytes key, final long from, final long to);
 
     /**
+     * Fetch all records from the segmented store with the provided key and time range
+     * from all existing segments in backward order (from latest to earliest)
+     * @param key       the key to match
+     * @param from      earliest time to match
+     * @param to        latest time to match
+     * @return  an iterator over key-value pairs
+     */
+    KeyValueIterator<Bytes, byte[]> backwardFetch(final Bytes key, final long from, final long to);
+
+    /**
      * Fetch all records from the segmented store in the provided key range and time range
      * from all existing segments
      * @param keyFrom   The first key that could be in the range
@@ -51,12 +62,60 @@ public interface SegmentedBytesStore extends StateStore {
     KeyValueIterator<Bytes, byte[]> fetch(final Bytes keyFrom, final Bytes keyTo, final long from, final long to);
 
     /**
+     * Fetch all records from the segmented store in the provided key range and time range
+     * from all existing segments in backward order (from latest to earliest)
+     * @param keyFrom   The first key that could be in the range
+     * @param keyTo     The last key that could be in the range
+     * @param from      earliest time to match
+     * @param to        latest time to match
+     * @return  an iterator over key-value pairs
+     */
+    KeyValueIterator<Bytes, byte[]> backwardFetch(final Bytes keyFrom, final Bytes keyTo, final long from, final long to);
+
+    /**
+     * Gets all the key-value pairs in the existing windows.
+     *
+     * @return an iterator over windowed key-value pairs {@code <Windowed<K>, value>}
+     * @throws InvalidStateStoreException if the store is not initialized
+     */
+    KeyValueIterator<Bytes, byte[]> all();
+
+    /**
+     * Gets all the key-value pairs in the existing windows in backward order (from latest to earliest).
+     *
+     * @return an iterator over windowed key-value pairs {@code <Windowed<K>, value>}
+     * @throws InvalidStateStoreException if the store is not initialized
+     */
+    KeyValueIterator<Bytes, byte[]> backwardAll();
+
+    /**
+     * Gets all the key-value pairs that belong to the windows within in the given time range.
+     *
+     * @param from the beginning of the time slot from which to search
+     * @param to   the end of the time slot from which to search
+     * @return an iterator over windowed key-value pairs {@code <Windowed<K>, value>}
+     * @throws InvalidStateStoreException if the store is not initialized
+     * @throws NullPointerException if null is used for any key
+     */
+    KeyValueIterator<Bytes, byte[]> fetchAll(final long from, final long to);
+
+    KeyValueIterator<Bytes, byte[]> backwardFetchAll(final long from, final long to);
+
+    /**
      * Remove the record with the provided key. The key
      * should be a composite of the record key, and the timestamp information etc
      * as described by the {@link KeySchema}
      * @param key   the segmented key to remove
      */
     void remove(Bytes key);
+
+    /**
+     * Remove all duplicated records with the provided key in the specified timestamp.
+     *
+     * @param key   the segmented key to remove
+     * @param timestamp  the timestamp to match
+     */
+    void remove(Bytes key, long timestamp);
 
     /**
      * Write a new value to the store with the provided key. The key
@@ -79,13 +138,6 @@ public interface SegmentedBytesStore extends StateStore {
     interface KeySchema {
 
         /**
-         * Initialized the schema with a topic.
-         *
-         * @param topic a topic name
-         */
-        void init(final String topic);
-
-        /**
          * Given a range of record keys and a time, construct a Segmented key that represents
          * the upper range of keys to search when performing range queries.
          * @see SessionKeySchema#upperRange
@@ -106,6 +158,18 @@ public interface SegmentedBytesStore extends StateStore {
          * @return      The key that represents the lower range to search for in the store
          */
         Bytes lowerRange(final Bytes key, final long from);
+
+        /**
+         * Given a record key and a time, construct a Segmented key to search when performing
+         * prefixed queries.
+         *
+         * @param key
+         * @param timestamp
+         * @return  The key that represents the prefixed Segmented key in bytes.
+         */
+        default Bytes toStoreBinaryKeyPrefix(final Bytes key, long timestamp) {
+            throw new UnsupportedOperationException();
+        }
 
         /**
          * Given a range of fixed size record keys and a time, construct a Segmented key that represents
@@ -141,7 +205,7 @@ public interface SegmentedBytesStore extends StateStore {
 
         /**
          * Create an implementation of {@link HasNextCondition} that knows when
-         * to stop iterating over the Segments. Used during {@link SegmentedBytesStore#fetch(Bytes, Bytes, long, long)} operations
+         * to stop iterating over the KeyValueSegments. Used during {@link SegmentedBytesStore#fetch(Bytes, Bytes, long, long)} operations
          * @param binaryKeyFrom the first key in the range
          * @param binaryKeyTo   the last key in the range
          * @param from          starting time range
@@ -158,6 +222,6 @@ public interface SegmentedBytesStore extends StateStore {
          * @param to
          * @return  List of segments to search
          */
-        List<Segment> segmentsToSearch(Segments segments, long from, long to);
+        <S extends Segment> List<S> segmentsToSearch(Segments<S> segments, long from, long to, boolean forward);
     }
 }

@@ -16,153 +16,211 @@
  */
 package org.apache.kafka.common.protocol;
 
+import org.apache.kafka.common.message.ApiMessageType;
 import org.apache.kafka.common.protocol.types.Schema;
-import org.apache.kafka.common.protocol.types.SchemaException;
-import org.apache.kafka.common.protocol.types.Struct;
+import org.apache.kafka.common.protocol.types.Type;
+import org.apache.kafka.common.record.RecordBatch;
 
-import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.EnumMap;
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+import static org.apache.kafka.common.protocol.types.Type.BYTES;
+import static org.apache.kafka.common.protocol.types.Type.COMPACT_BYTES;
+import static org.apache.kafka.common.protocol.types.Type.COMPACT_NULLABLE_BYTES;
+import static org.apache.kafka.common.protocol.types.Type.NULLABLE_BYTES;
+import static org.apache.kafka.common.protocol.types.Type.RECORDS;
 
 /**
  * Identifiers for all the Kafka APIs
  */
 public enum ApiKeys {
-    PRODUCE(0, "Produce", false),
-    FETCH(1, "Fetch", false),
-    LIST_OFFSETS(2, "Offsets", false),
-    METADATA(3, "Metadata", false),
-    LEADER_AND_ISR(4, "LeaderAndIsr", true),
-    STOP_REPLICA(5, "StopReplica", true),
-    UPDATE_METADATA_KEY(6, "UpdateMetadata", true),
-    CONTROLLED_SHUTDOWN_KEY(7, "ControlledShutdown", true),
-    OFFSET_COMMIT(8, "OffsetCommit", false),
-    OFFSET_FETCH(9, "OffsetFetch", false),
-    FIND_COORDINATOR(10, "FindCoordinator", false),
-    JOIN_GROUP(11, "JoinGroup", false),
-    HEARTBEAT(12, "Heartbeat", false),
-    LEAVE_GROUP(13, "LeaveGroup", false),
-    SYNC_GROUP(14, "SyncGroup", false),
-    DESCRIBE_GROUPS(15, "DescribeGroups", false),
-    LIST_GROUPS(16, "ListGroups", false),
-    SASL_HANDSHAKE(17, "SaslHandshake", false),
-    API_VERSIONS(18, "ApiVersions", false) {
-        @Override
-        public Struct parseResponse(short version, ByteBuffer buffer) {
-            // Fallback to version 0 for ApiVersions response. If a client sends an ApiVersionsRequest
-            // using a version higher than that supported by the broker, a version 0 response is sent
-            // to the client indicating UNSUPPORTED_VERSION.
-            return parseResponse(version, buffer, (short) 0);
-        }
-    },
-    CREATE_TOPICS(19, "CreateTopics", false),
-    DELETE_TOPICS(20, "DeleteTopics", false),
-    DELETE_RECORDS(21, "DeleteRecords", false),
-    INIT_PRODUCER_ID(22, "InitProducerId", false),
-    OFFSET_FOR_LEADER_EPOCH(23, "OffsetForLeaderEpoch", true),
-    ADD_PARTITIONS_TO_TXN(24, "AddPartitionsToTxn", false),
-    ADD_OFFSETS_TO_TXN(25, "AddOffsetsToTxn", false),
-    END_TXN(26, "EndTxn", false),
-    WRITE_TXN_MARKERS(27, "WriteTxnMarkers", true),
-    TXN_OFFSET_COMMIT(28, "TxnOffsetCommit", false),
-    DESCRIBE_ACLS(29, "DescribeAcls", false),
-    CREATE_ACLS(30, "CreateAcls", false),
-    DELETE_ACLS(31, "DeleteAcls", false),
-    DESCRIBE_CONFIGS(32, "DescribeConfigs", false),
-    ALTER_CONFIGS(33, "AlterConfigs", false);
+    PRODUCE(ApiMessageType.PRODUCE),
+    FETCH(ApiMessageType.FETCH),
+    LIST_OFFSETS(ApiMessageType.LIST_OFFSETS),
+    METADATA(ApiMessageType.METADATA),
+    LEADER_AND_ISR(ApiMessageType.LEADER_AND_ISR, true),
+    STOP_REPLICA(ApiMessageType.STOP_REPLICA, true),
+    UPDATE_METADATA(ApiMessageType.UPDATE_METADATA, true),
+    CONTROLLED_SHUTDOWN(ApiMessageType.CONTROLLED_SHUTDOWN, true),
+    OFFSET_COMMIT(ApiMessageType.OFFSET_COMMIT),
+    OFFSET_FETCH(ApiMessageType.OFFSET_FETCH),
+    FIND_COORDINATOR(ApiMessageType.FIND_COORDINATOR),
+    JOIN_GROUP(ApiMessageType.JOIN_GROUP),
+    HEARTBEAT(ApiMessageType.HEARTBEAT),
+    LEAVE_GROUP(ApiMessageType.LEAVE_GROUP),
+    SYNC_GROUP(ApiMessageType.SYNC_GROUP),
+    DESCRIBE_GROUPS(ApiMessageType.DESCRIBE_GROUPS),
+    LIST_GROUPS(ApiMessageType.LIST_GROUPS),
+    SASL_HANDSHAKE(ApiMessageType.SASL_HANDSHAKE),
+    API_VERSIONS(ApiMessageType.API_VERSIONS),
+    CREATE_TOPICS(ApiMessageType.CREATE_TOPICS, false, true),
+    DELETE_TOPICS(ApiMessageType.DELETE_TOPICS, false, true),
+    DELETE_RECORDS(ApiMessageType.DELETE_RECORDS),
+    INIT_PRODUCER_ID(ApiMessageType.INIT_PRODUCER_ID),
+    OFFSET_FOR_LEADER_EPOCH(ApiMessageType.OFFSET_FOR_LEADER_EPOCH),
+    ADD_PARTITIONS_TO_TXN(ApiMessageType.ADD_PARTITIONS_TO_TXN, false, RecordBatch.MAGIC_VALUE_V2, false),
+    ADD_OFFSETS_TO_TXN(ApiMessageType.ADD_OFFSETS_TO_TXN, false, RecordBatch.MAGIC_VALUE_V2, false),
+    END_TXN(ApiMessageType.END_TXN, false, RecordBatch.MAGIC_VALUE_V2, false),
+    WRITE_TXN_MARKERS(ApiMessageType.WRITE_TXN_MARKERS, true, RecordBatch.MAGIC_VALUE_V2, false),
+    TXN_OFFSET_COMMIT(ApiMessageType.TXN_OFFSET_COMMIT, false, RecordBatch.MAGIC_VALUE_V2, false),
+    DESCRIBE_ACLS(ApiMessageType.DESCRIBE_ACLS),
+    CREATE_ACLS(ApiMessageType.CREATE_ACLS, false, true),
+    DELETE_ACLS(ApiMessageType.DELETE_ACLS, false, true),
+    DESCRIBE_CONFIGS(ApiMessageType.DESCRIBE_CONFIGS),
+    ALTER_CONFIGS(ApiMessageType.ALTER_CONFIGS, false, true),
+    ALTER_REPLICA_LOG_DIRS(ApiMessageType.ALTER_REPLICA_LOG_DIRS),
+    DESCRIBE_LOG_DIRS(ApiMessageType.DESCRIBE_LOG_DIRS),
+    SASL_AUTHENTICATE(ApiMessageType.SASL_AUTHENTICATE),
+    CREATE_PARTITIONS(ApiMessageType.CREATE_PARTITIONS, false, true),
+    CREATE_DELEGATION_TOKEN(ApiMessageType.CREATE_DELEGATION_TOKEN, false, true),
+    RENEW_DELEGATION_TOKEN(ApiMessageType.RENEW_DELEGATION_TOKEN, false, true),
+    EXPIRE_DELEGATION_TOKEN(ApiMessageType.EXPIRE_DELEGATION_TOKEN, false, true),
+    DESCRIBE_DELEGATION_TOKEN(ApiMessageType.DESCRIBE_DELEGATION_TOKEN),
+    DELETE_GROUPS(ApiMessageType.DELETE_GROUPS),
+    ELECT_LEADERS(ApiMessageType.ELECT_LEADERS),
+    INCREMENTAL_ALTER_CONFIGS(ApiMessageType.INCREMENTAL_ALTER_CONFIGS, false, true),
+    ALTER_PARTITION_REASSIGNMENTS(ApiMessageType.ALTER_PARTITION_REASSIGNMENTS, false, true),
+    LIST_PARTITION_REASSIGNMENTS(ApiMessageType.LIST_PARTITION_REASSIGNMENTS),
+    OFFSET_DELETE(ApiMessageType.OFFSET_DELETE),
+    DESCRIBE_CLIENT_QUOTAS(ApiMessageType.DESCRIBE_CLIENT_QUOTAS),
+    ALTER_CLIENT_QUOTAS(ApiMessageType.ALTER_CLIENT_QUOTAS, false, true),
+    DESCRIBE_USER_SCRAM_CREDENTIALS(ApiMessageType.DESCRIBE_USER_SCRAM_CREDENTIALS),
+    ALTER_USER_SCRAM_CREDENTIALS(ApiMessageType.ALTER_USER_SCRAM_CREDENTIALS, false, true),
+    VOTE(ApiMessageType.VOTE, true, RecordBatch.MAGIC_VALUE_V0, false),
+    BEGIN_QUORUM_EPOCH(ApiMessageType.BEGIN_QUORUM_EPOCH, true, RecordBatch.MAGIC_VALUE_V0, false),
+    END_QUORUM_EPOCH(ApiMessageType.END_QUORUM_EPOCH, true, RecordBatch.MAGIC_VALUE_V0, false),
+    DESCRIBE_QUORUM(ApiMessageType.DESCRIBE_QUORUM, true, RecordBatch.MAGIC_VALUE_V0, false),
+    ALTER_ISR(ApiMessageType.ALTER_ISR, true),
+    UPDATE_FEATURES(ApiMessageType.UPDATE_FEATURES, false, true),
+    ENVELOPE(ApiMessageType.ENVELOPE, true, RecordBatch.MAGIC_VALUE_V0, false),
+    FETCH_SNAPSHOT(ApiMessageType.FETCH_SNAPSHOT, false, RecordBatch.MAGIC_VALUE_V0, false),
+    DESCRIBE_CLUSTER(ApiMessageType.DESCRIBE_CLUSTER),
+    DESCRIBE_PRODUCERS(ApiMessageType.DESCRIBE_PRODUCERS),
+    BROKER_REGISTRATION(ApiMessageType.BROKER_REGISTRATION, true, RecordBatch.MAGIC_VALUE_V0, false),
+    BROKER_HEARTBEAT(ApiMessageType.BROKER_HEARTBEAT, true, RecordBatch.MAGIC_VALUE_V0, false),
+    UNREGISTER_BROKER(ApiMessageType.UNREGISTER_BROKER, false, RecordBatch.MAGIC_VALUE_V0, true),
+    DESCRIBE_TRANSACTIONS(ApiMessageType.DESCRIBE_TRANSACTIONS),
+    LIST_TRANSACTIONS(ApiMessageType.LIST_TRANSACTIONS);
 
-    private static final ApiKeys[] ID_TO_TYPE;
-    private static final int MIN_API_KEY = 0;
-    public static final int MAX_API_KEY;
+    private static final Map<ApiMessageType.ListenerType, EnumSet<ApiKeys>> APIS_BY_LISTENER =
+        new EnumMap<>(ApiMessageType.ListenerType.class);
 
     static {
-        int maxKey = -1;
-        for (ApiKeys key : ApiKeys.values())
-            maxKey = Math.max(maxKey, key.id);
-        ApiKeys[] idToType = new ApiKeys[maxKey + 1];
-        for (ApiKeys key : ApiKeys.values())
-            idToType[key.id] = key;
-        ID_TO_TYPE = idToType;
-        MAX_API_KEY = maxKey;
+        for (ApiMessageType.ListenerType listenerType : ApiMessageType.ListenerType.values()) {
+            APIS_BY_LISTENER.put(listenerType, filterApisForListener(listenerType));
+        }
     }
 
-    /** the permanent and immutable id of an API--this can't change ever */
+    // The generator ensures every `ApiMessageType` has a unique id
+    private static final Map<Integer, ApiKeys> ID_TO_TYPE = Arrays.stream(ApiKeys.values())
+        .collect(Collectors.toMap(key -> (int) key.id, Function.identity()));
+
+    /** the permanent and immutable id of an API - this can't change ever */
     public final short id;
 
-    /** an english description of the api--this is for debugging and can change */
+    /** An english description of the api - used for debugging and metric names, it can potentially be changed via a KIP */
     public final String name;
 
     /** indicates if this is a ClusterAction request used only by brokers */
     public final boolean clusterAction;
 
-    ApiKeys(int id, String name, boolean clusterAction) {
-        if (id < 0)
-            throw new IllegalArgumentException("id must not be negative, id: " + id);
-        this.id = (short) id;
-        this.name = name;
+    /** indicates the minimum required inter broker magic required to support the API */
+    public final byte minRequiredInterBrokerMagic;
+
+    /** indicates whether the API is enabled for forwarding **/
+    public final boolean forwardable;
+
+    public final boolean requiresDelayedAllocation;
+
+    public final ApiMessageType messageType;
+
+    ApiKeys(ApiMessageType messageType) {
+        this(messageType, false);
+    }
+
+    ApiKeys(ApiMessageType messageType, boolean clusterAction) {
+        this(messageType, clusterAction, RecordBatch.MAGIC_VALUE_V0, false);
+    }
+
+    ApiKeys(ApiMessageType messageType, boolean clusterAction, boolean forwardable) {
+        this(messageType, clusterAction, RecordBatch.MAGIC_VALUE_V0, forwardable);
+    }
+
+    ApiKeys(
+        ApiMessageType messageType,
+        boolean clusterAction,
+        byte minRequiredInterBrokerMagic,
+        boolean forwardable
+    ) {
+        this.messageType = messageType;
+        this.id = messageType.apiKey();
+        this.name = messageType.name;
         this.clusterAction = clusterAction;
+        this.minRequiredInterBrokerMagic = minRequiredInterBrokerMagic;
+        this.requiresDelayedAllocation = forwardable || shouldRetainsBufferReference(messageType.requestSchemas());
+        this.forwardable = forwardable;
+    }
+
+    private static boolean shouldRetainsBufferReference(Schema[] requestSchemas) {
+        boolean requestRetainsBufferReference = false;
+        for (Schema requestVersionSchema : requestSchemas) {
+            if (retainsBufferReference(requestVersionSchema)) {
+                requestRetainsBufferReference = true;
+                break;
+            }
+        }
+        return requestRetainsBufferReference;
     }
 
     public static ApiKeys forId(int id) {
-        if (!hasId(id))
-            throw new IllegalArgumentException(String.format("Unexpected ApiKeys id `%s`, it should be between `%s` " +
-                    "and `%s` (inclusive)", id, MIN_API_KEY, MAX_API_KEY));
-        return ID_TO_TYPE[id];
+        ApiKeys apiKey = ID_TO_TYPE.get(id);
+        if (apiKey == null) {
+            throw new IllegalArgumentException("Unexpected api key: " + id);
+        }
+        return apiKey;
     }
 
     public static boolean hasId(int id) {
-        return id >= MIN_API_KEY && id <= MAX_API_KEY;
+        return ID_TO_TYPE.containsKey(id);
     }
 
     public short latestVersion() {
-        if (id >= Protocol.CURR_VERSION.length)
-            throw new IllegalArgumentException("Latest version for API key " + this + " is not defined");
-        return Protocol.CURR_VERSION[id];
+        return messageType.highestSupportedVersion();
     }
 
     public short oldestVersion() {
-        if (id >= Protocol.MIN_VERSIONS.length)
-            throw new IllegalArgumentException("Oldest version for API key " + this + " is not defined");
-        return Protocol.MIN_VERSIONS[id];
+        return messageType.lowestSupportedVersion();
     }
 
-    public Schema requestSchema(short version) {
-        return schemaFor(Protocol.REQUESTS, version);
-    }
-
-    public Schema responseSchema(short version) {
-        return schemaFor(Protocol.RESPONSES, version);
-    }
-
-    public Struct parseRequest(short version, ByteBuffer buffer) {
-        return requestSchema(version).read(buffer);
-    }
-
-    public Struct parseResponse(short version, ByteBuffer buffer) {
-        return responseSchema(version).read(buffer);
-    }
-
-    protected Struct parseResponse(short version, ByteBuffer buffer, short fallbackVersion) {
-        int bufferPosition = buffer.position();
-        try {
-            return responseSchema(version).read(buffer);
-        } catch (SchemaException e) {
-            if (version != fallbackVersion) {
-                buffer.position(bufferPosition);
-                return responseSchema(fallbackVersion).read(buffer);
-            } else
-                throw e;
+    public List<Short> allVersions() {
+        List<Short> versions = new ArrayList<>(latestVersion() - oldestVersion() + 1);
+        for (short version = oldestVersion(); version <= latestVersion(); version++) {
+            versions.add(version);
         }
+        return versions;
     }
 
-    private Schema schemaFor(Schema[][] schemas, short version) {
-        if (id > schemas.length)
-            throw new IllegalArgumentException("No schema available for API key " + this);
-        if (version < 0 || version > latestVersion())
-            throw new IllegalArgumentException("Invalid version for API key " + this + ": " + version);
+    public boolean isVersionSupported(short apiVersion) {
+        return apiVersion >= oldestVersion() && apiVersion <= latestVersion();
+    }
 
-        Schema[] versions = schemas[id];
-        if (versions[version] == null)
-            throw new IllegalArgumentException("Unsupported version for API key " + this + ": " + version);
-        return versions[version];
+    public short requestHeaderVersion(short apiVersion) {
+        return messageType.requestHeaderVersion(apiVersion);
+    }
+
+    public short responseHeaderVersion(short apiVersion) {
+        return messageType.responseHeaderVersion(apiVersion);
+    }
+
+    public boolean inScope(ApiMessageType.ListenerType listener) {
+        return messageType.listeners().contains(listener);
     }
 
     private static String toHtml() {
@@ -172,7 +230,7 @@ public enum ApiKeys {
         b.append("<th>Name</th>\n");
         b.append("<th>Key</th>\n");
         b.append("</tr>");
-        for (ApiKeys key : ApiKeys.values()) {
+        for (ApiKeys key : zkBrokerApis()) {
             b.append("<tr>\n");
             b.append("<td>");
             b.append("<a href=\"#The_Messages_" + key.name + "\">" + key.name + "</a>");
@@ -188,6 +246,35 @@ public enum ApiKeys {
 
     public static void main(String[] args) {
         System.out.println(toHtml());
+    }
+
+    private static boolean retainsBufferReference(Schema schema) {
+        final AtomicBoolean hasBuffer = new AtomicBoolean(false);
+        Schema.Visitor detector = new Schema.Visitor() {
+            @Override
+            public void visit(Type field) {
+                if (field == BYTES || field == NULLABLE_BYTES || field == RECORDS ||
+                    field == COMPACT_BYTES || field == COMPACT_NULLABLE_BYTES)
+                    hasBuffer.set(true);
+            }
+        };
+        schema.walk(detector);
+        return hasBuffer.get();
+    }
+
+    public static EnumSet<ApiKeys> zkBrokerApis() {
+        return apisForListener(ApiMessageType.ListenerType.ZK_BROKER);
+    }
+
+    public static EnumSet<ApiKeys> apisForListener(ApiMessageType.ListenerType listener) {
+        return APIS_BY_LISTENER.get(listener);
+    }
+
+    private static EnumSet<ApiKeys> filterApisForListener(ApiMessageType.ListenerType listener) {
+        List<ApiKeys> controllerApis = Arrays.stream(ApiKeys.values())
+            .filter(apiKey -> apiKey.messageType.listeners().contains(listener))
+            .collect(Collectors.toList());
+        return EnumSet.copyOf(controllerApis);
     }
 
 }

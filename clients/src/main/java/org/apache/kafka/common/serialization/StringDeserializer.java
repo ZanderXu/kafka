@@ -19,6 +19,7 @@ package org.apache.kafka.common.serialization;
 import org.apache.kafka.common.errors.SerializationException;
 
 import java.io.UnsupportedEncodingException;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
 /**
@@ -26,7 +27,7 @@ import java.util.Map;
  *  value.deserializer.encoding or deserializer.encoding. The first two take precedence over the last.
  */
 public class StringDeserializer implements Deserializer<String> {
-    private String encoding = "UTF8";
+    private String encoding = StandardCharsets.UTF_8.name();
 
     @Override
     public void configure(Map<String, ?> configs, boolean isKey) {
@@ -34,7 +35,7 @@ public class StringDeserializer implements Deserializer<String> {
         Object encodingValue = configs.get(propertyName);
         if (encodingValue == null)
             encodingValue = configs.get("deserializer.encoding");
-        if (encodingValue != null && encodingValue instanceof String)
+        if (encodingValue instanceof String)
             encoding = (String) encodingValue;
     }
 
@@ -48,10 +49,5 @@ public class StringDeserializer implements Deserializer<String> {
         } catch (UnsupportedEncodingException e) {
             throw new SerializationException("Error when deserializing byte[] to string due to unsupported encoding " + encoding);
         }
-    }
-
-    @Override
-    public void close() {
-        // nothing to do
     }
 }

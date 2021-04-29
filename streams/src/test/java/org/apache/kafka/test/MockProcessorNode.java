@@ -16,47 +16,51 @@
  */
 package org.apache.kafka.test;
 
-import org.apache.kafka.streams.processor.ProcessorContext;
+import org.apache.kafka.streams.processor.PunctuationType;
+import org.apache.kafka.streams.processor.api.Record;
+import org.apache.kafka.streams.processor.internals.InternalProcessorContext;
 import org.apache.kafka.streams.processor.internals.ProcessorNode;
 
 import java.util.Collections;
 import java.util.concurrent.atomic.AtomicInteger;
 
-public class MockProcessorNode<K, V> extends ProcessorNode<K, V> {
+public class MockProcessorNode<KIn, VIn, KOut, VOut> extends ProcessorNode<KIn, VIn, KOut, VOut> {
 
     private static final String NAME = "MOCK-PROCESS-";
     private static final AtomicInteger INDEX = new AtomicInteger(1);
 
-    public final MockProcessorSupplier<K, V> supplier;
+    public final MockProcessor<KIn, VIn> mockProcessor;
+
     public boolean closed;
-    public long punctuatedAt;
     public boolean initialized;
 
-    public MockProcessorNode(long scheduleInterval) {
-        this(new MockProcessorSupplier<K, V>(scheduleInterval));
+    public MockProcessorNode(final long scheduleInterval) {
+        this(scheduleInterval, PunctuationType.STREAM_TIME);
     }
 
-    private MockProcessorNode(MockProcessorSupplier<K, V> supplier) {
-        super(NAME + INDEX.getAndIncrement(), supplier.get(), Collections.<String>emptySet());
+    public MockProcessorNode(final long scheduleInterval, final PunctuationType punctuationType) {
+        this(new MockProcessor<>(punctuationType, scheduleInterval));
+    }
 
-        this.supplier = supplier;
+    public MockProcessorNode() {
+        this(new MockProcessor<>());
+    }
+
+    private MockProcessorNode(final MockProcessor<KIn, VIn> mockProcessor) {
+        super(NAME + INDEX.getAndIncrement(), mockProcessor, Collections.<String>emptySet());
+
+        this.mockProcessor = mockProcessor;
     }
 
     @Override
-    public void init(final ProcessorContext context) {
+    public void init(final InternalProcessorContext context) {
         super.init(context);
         initialized = true;
     }
 
     @Override
-    public void process(K key, V value) {
-        processor().process(key, value);
-    }
-
-    @Override
-    public void punctuate(final long timestamp) {
-        super.punctuate(timestamp);
-        this.punctuatedAt = timestamp;
+    public void process(final Record<KIn, VIn> record) {
+        processor().process(record);
     }
 
     @Override

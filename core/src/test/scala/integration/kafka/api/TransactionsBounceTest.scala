@@ -19,25 +19,24 @@ package kafka.api
 
 import java.util.Properties
 
-import kafka.integration.KafkaServerTestHarness
 import kafka.server.KafkaConfig
 import kafka.utils.{ShutdownableThread, TestUtils}
-import org.apache.kafka.clients.consumer.{ConsumerConfig, ConsumerRecord}
-import org.apache.kafka.clients.producer.ProducerRecord
+import org.apache.kafka.clients.consumer.{ConsumerConfig, KafkaConsumer}
+import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig}
 import org.apache.kafka.clients.producer.internals.ErrorLoggingCallback
-import org.apache.kafka.common.protocol.SecurityProtocol
-import org.junit.{Ignore, Test}
+import org.apache.kafka.common.TopicPartition
+import org.junit.jupiter.api.Assertions._
+import org.junit.jupiter.api.Test
 
-import scala.collection.JavaConversions._
-import org.junit.Assert._
+import scala.annotation.nowarn
+import scala.jdk.CollectionConverters._
+import scala.collection.mutable
 
-
-class TransactionsBounceTest extends KafkaServerTestHarness {
+class TransactionsBounceTest extends IntegrationTestHarness {
+  private val consumeRecordTimeout = 30000
   private val producerBufferSize =  65536
   private val serverMessageMaxBytes =  producerBufferSize/2
   private val numPartitions = 3
-
-  val numServers = 4
   private val outputTopic = "output-topic"
   private val inputTopic = "input-topic"
 
@@ -57,7 +56,6 @@ class TransactionsBounceTest extends KafkaServerTestHarness {
   overridingProps.put(KafkaConfig.GroupMinSessionTimeoutMsProp, "10") // set small enough session timeout
   overridingProps.put(KafkaConfig.GroupInitialRebalanceDelayMsProp, "0")
 
-
   // This is the one of the few tests we currently allow to preallocate ports, despite the fact that this can result in transient
   // failures due to ports getting reused. We can't use random ports because of bad behavior that can result from bouncing
   // brokers too quickly when they get new, random ports. If we're not careful, the client can end up in a situation
@@ -67,46 +65,60 @@ class TransactionsBounceTest extends KafkaServerTestHarness {
   //
   // Since such quick rotation of servers is incredibly unrealistic, we allow this one test to preallocate ports, leaving
   // a small risk of hitting errors due to port conflicts. Hopefully this is infrequent enough to not cause problems.
-  override def generateConfigs() = {
-    FixedPortTestUtils.createBrokerConfigs(numServers, zkConnect,enableControlledShutdown = true)
+  override def generateConfigs = {
+    FixedPortTestUtils.createBrokerConfigs(brokerCount, zkConnect, enableControlledShutdown = true)
       .map(KafkaConfig.fromProps(_, overridingProps))
   }
 
-  @Ignore  // Disabling this as it is flaky on Jenkins.
+  override protected def brokerCount: Int = 4
+
+  @nowarn("cat=deprecation")
   @Test
-  def testBrokerFailure() {
+  def testWithGroupId(): Unit = {
+    testBrokerFailure((producer, groupId, consumer) =>
+      producer.sendOffsetsToTransaction(TestUtils.consumerPositions(consumer).asJava, groupId))
+  }
+
+  @Test
+  def testWithGroupMetadata(): Unit = {
+    testBrokerFailure((producer, _, consumer) =>
+      producer.sendOffsetsToTransaction(TestUtils.consumerPositions(consumer).asJava, consumer.groupMetadata()))
+  }
+
+  private def testBrokerFailure(commit: (KafkaProducer[Array[Byte], Array[Byte]],
+    String, KafkaConsumer[Array[Byte], Array[Byte]]) => Unit): Unit = {
     // basic idea is to seed a topic with 10000 records, and copy it transactionally while bouncing brokers
     // constantly through the period.
     val consumerGroup = "myGroup"
-    val numInputRecords = 5000
+    val numInputRecords = 10000
     createTopics()
 
     TestUtils.seedTopicWithNumberedRecords(inputTopic, numInputRecords, servers)
-    val consumer = createConsumerAndSubscribeToTopics(consumerGroup, List(inputTopic))
-    val producer = TestUtils.createTransactionalProducer("test-txn", servers)
+    val consumer = createConsumerAndSubscribe(consumerGroup, List(inputTopic))
+    val producer = createTransactionalProducer("test-txn")
 
     producer.initTransactions()
 
     val scheduler = new BounceScheduler
     scheduler.start()
 
-    var numMessagesProcessed = 0
-    var iteration = 0
     try {
+      var numMessagesProcessed = 0
+      var iteration = 0
+
       while (numMessagesProcessed < numInputRecords) {
         val toRead = Math.min(200, numInputRecords - numMessagesProcessed)
         trace(s"$iteration: About to read $toRead messages, processed $numMessagesProcessed so far..")
-        val records = TestUtils.pollUntilAtLeastNumRecords(consumer, toRead)
+        val records = TestUtils.pollUntilAtLeastNumRecords(consumer, toRead, waitTimeMs = consumeRecordTimeout)
         trace(s"Received ${records.size} messages, sending them transactionally to $outputTopic")
 
         producer.beginTransaction()
         val shouldAbort = iteration % 3 == 0
         records.foreach { record =>
-          producer.send(TestUtils.producerRecordWithExpectedTransactionStatus(outputTopic, record.key, record.value,
-            !shouldAbort), new ErrorLoggingCallback(outputTopic, record.key, record.value, true))
+          producer.send(TestUtils.producerRecordWithExpectedTransactionStatus(outputTopic, null, record.key, record.value, !shouldAbort), new ErrorLoggingCallback(outputTopic, record.key, record.value, true))
         }
         trace(s"Sent ${records.size} messages. Committing offsets.")
-        producer.sendOffsetsToTransaction(TestUtils.consumerPositions(consumer), consumerGroup)
+        commit(producer, consumerGroup, consumer)
 
         if (shouldAbort) {
           trace(s"Committed offsets. Aborting transaction of ${records.size} messages.")
@@ -120,46 +132,58 @@ class TransactionsBounceTest extends KafkaServerTestHarness {
         iteration += 1
       }
     } finally {
-      producer.close()
-      consumer.close()
+      scheduler.shutdown()
     }
 
-    scheduler.shutdown()
-
-    val verifyingConsumer = createConsumerAndSubscribeToTopics("randomGroup", List(outputTopic), readCommitted = true)
-    val outputRecords = TestUtils.pollUntilAtLeastNumRecords(verifyingConsumer, numInputRecords).map { record =>
-      TestUtils.assertCommittedAndGetValue(record).toInt
+    val verifyingConsumer = createConsumerAndSubscribe("randomGroup", List(outputTopic), readCommitted = true)
+    val recordsByPartition = new mutable.HashMap[TopicPartition, mutable.ListBuffer[Int]]()
+    TestUtils.pollUntilAtLeastNumRecords(verifyingConsumer, numInputRecords, waitTimeMs = consumeRecordTimeout).foreach { record =>
+      val value = TestUtils.assertCommittedAndGetValue(record).toInt
+      val topicPartition = new TopicPartition(record.topic(), record.partition())
+      recordsByPartition.getOrElseUpdate(topicPartition, new mutable.ListBuffer[Int])
+        .append(value)
     }
+
+    val outputRecords = new mutable.ListBuffer[Int]()
+    recordsByPartition.values.foreach { partitionValues =>
+      assertEquals(partitionValues, partitionValues.sorted, "Out of order messages detected")
+      outputRecords.appendAll(partitionValues)
+    }
+
     val recordSet = outputRecords.toSet
     assertEquals(numInputRecords, recordSet.size)
 
     val expectedValues = (0 until numInputRecords).toSet
-    assertEquals(s"Missing messages: ${expectedValues -- recordSet}", expectedValues, recordSet)
-
-    verifyingConsumer.close()
+    assertEquals(expectedValues, recordSet, s"Missing messages: ${expectedValues -- recordSet}")
   }
 
-  private def createConsumerAndSubscribeToTopics(groupId: String, topics: List[String], readCommitted: Boolean = false) = {
+  private def createTransactionalProducer(transactionalId: String) = {
     val props = new Properties()
-    if (readCommitted)
-      props.put(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed")
-    props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, "2000")
-    props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false")
-    props.put(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, "10000")
-    props.put(ConsumerConfig.HEARTBEAT_INTERVAL_MS_CONFIG, "3000")
-    props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest")
+    props.put(ProducerConfig.ACKS_CONFIG, "all")
+    props.put(ProducerConfig.BATCH_SIZE_CONFIG, "512")
+    props.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, transactionalId)
+    props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true")
+    createProducer(configOverrides = props)
+  }
 
-    val consumer = TestUtils.createNewConsumer(TestUtils.getBrokerListStrFromServers(servers), groupId = groupId,
-      securityProtocol = SecurityProtocol.PLAINTEXT, props = Some(props))
-    consumer.subscribe(topics)
+  private def createConsumerAndSubscribe(groupId: String,
+                                         topics: List[String],
+                                         readCommitted: Boolean = false) = {
+    val consumerProps = new Properties
+    consumerProps.put(ConsumerConfig.GROUP_ID_CONFIG, groupId)
+    consumerProps.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false")
+    consumerProps.put(ConsumerConfig.ISOLATION_LEVEL_CONFIG,
+      if (readCommitted) "read_committed" else "read_uncommitted")
+    val consumer = createConsumer(configOverrides = consumerProps)
+    consumer.subscribe(topics.asJava)
     consumer
   }
 
   private def createTopics() =  {
     val topicConfig = new Properties()
     topicConfig.put(KafkaConfig.MinInSyncReplicasProp, 2.toString)
-    TestUtils.createTopic(zkUtils, inputTopic, numPartitions, 3, servers, topicConfig)
-    TestUtils.createTopic(zkUtils, outputTopic, numPartitions, 3, servers, topicConfig)
+    createTopic(inputTopic, numPartitions, 3, topicConfig)
+    createTopic(outputTopic, numPartitions, 3, topicConfig)
   }
 
   private class BounceScheduler extends ShutdownableThread("daemon-broker-bouncer", false) {
@@ -175,11 +199,12 @@ class TransactionsBounceTest extends KafkaServerTestHarness {
         Thread.sleep(500)
       }
 
-      (0 until numPartitions).foreach(partition => TestUtils.waitUntilLeaderIsElectedOrChanged(zkUtils, outputTopic, partition))
+      (0 until numPartitions).foreach(partition => TestUtils.waitUntilLeaderIsElectedOrChanged(zkClient, outputTopic, partition))
     }
 
-    override def shutdown(){
+    override def shutdown(): Unit = {
       super.shutdown()
    }
   }
+
 }

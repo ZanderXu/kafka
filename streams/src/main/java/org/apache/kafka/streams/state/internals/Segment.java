@@ -17,35 +17,13 @@
 package org.apache.kafka.streams.state.internals;
 
 import org.apache.kafka.common.utils.Bytes;
-import org.apache.kafka.common.utils.Utils;
-import org.apache.kafka.streams.processor.ProcessorContext;
+import org.apache.kafka.streams.state.KeyValueStore;
 
 import java.io.IOException;
 
-// Use the Bytes wrapper for underlying rocksDB keys since they are used for hashing data structures
-class Segment extends RocksDBStore<Bytes, byte[]> {
-    public final long id;
+public interface Segment extends KeyValueStore<Bytes, byte[]>, BatchWritingStore {
 
-    Segment(String segmentName, String windowName, long id) {
-        super(segmentName, windowName, WindowStoreUtils.INNER_KEY_SERDE, WindowStoreUtils.INNER_VALUE_SERDE);
-        this.id = id;
-    }
+    void destroy() throws IOException;
 
-    void destroy() throws IOException {
-        Utils.delete(dbDir);
-    }
-
-    @Override
-    public void openDB(final ProcessorContext context) {
-        super.openDB(context);
-
-        // skip the registering step
-
-        open = true;
-    }
-
-    @Override
-    public String toString() {
-        return "Segment(id=" + id + ", name=" + name() + ")";
-    }
+    void deleteRange(Bytes keyFrom, Bytes keyTo);
 }

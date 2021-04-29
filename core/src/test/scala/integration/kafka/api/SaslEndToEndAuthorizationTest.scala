@@ -16,16 +16,14 @@
   */
 package kafka.api
 
-import java.util.Properties
-
-import kafka.utils.TestUtils
-import org.apache.kafka.common.protocol.SecurityProtocol
 import org.apache.kafka.common.config.SaslConfigs
-import org.apache.kafka.common.errors.GroupAuthorizationException
-import org.junit.{Before, Test}
+import org.apache.kafka.common.security.auth.SecurityProtocol
+import org.apache.kafka.common.errors.{GroupAuthorizationException, TopicAuthorizationException}
+import org.junit.jupiter.api.{BeforeEach, Test, Timeout}
+import org.junit.jupiter.api.Assertions.{assertEquals, assertTrue, fail}
 
 import scala.collection.immutable.List
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 
 abstract class SaslEndToEndAuthorizationTest extends EndToEndAuthorizationTest {
   override protected def securityProtocol = SecurityProtocol.SASL_SSL
@@ -35,8 +33,8 @@ abstract class SaslEndToEndAuthorizationTest extends EndToEndAuthorizationTest {
   protected def kafkaClientSaslMechanism: String
   protected def kafkaServerSaslMechanisms: List[String]
   
-  @Before
-  override def setUp {
+  @BeforeEach
+  override def setUp(): Unit = {
     // create static config including client login context with credentials for JaasTestUtils 'client2'
     startSasl(jaasSections(kafkaServerSaslMechanisms, Option(kafkaClientSaslMechanism), Both))
     // set dynamic properties with credentials for JaasTestUtils 'client1' so that dynamic JAAS configuration is also
@@ -44,7 +42,8 @@ abstract class SaslEndToEndAuthorizationTest extends EndToEndAuthorizationTest {
     val clientLoginContext = jaasClientLoginModule(kafkaClientSaslMechanism)
     producerConfig.put(SaslConfigs.SASL_JAAS_CONFIG, clientLoginContext)
     consumerConfig.put(SaslConfigs.SASL_JAAS_CONFIG, clientLoginContext)
-    super.setUp
+    adminClientConfig.put(SaslConfigs.SASL_JAAS_CONFIG, clientLoginContext)
+    super.setUp()
   }
 
   /**
@@ -52,23 +51,17 @@ abstract class SaslEndToEndAuthorizationTest extends EndToEndAuthorizationTest {
     * The first consumer succeeds because it is allowed by the ACL, 
     * the second one connects ok, but fails to consume messages due to the ACL.
     */
-  @Test(timeout = 15000)
-  def testTwoConsumersWithDifferentSaslCredentials {
-    setAclsAndProduce()
-    val consumer1 = consumers.head
+  @Timeout(15)
+  @Test
+  def testTwoConsumersWithDifferentSaslCredentials(): Unit = {
+    setAclsAndProduce(tp)
+    val consumer1 = createConsumer()
 
-    val consumer2Config = new Properties
-    consumer2Config.putAll(consumerConfig)
     // consumer2 retrieves its credentials from the static JAAS configuration, so we test also this path
-    consumer2Config.remove(SaslConfigs.SASL_JAAS_CONFIG)
+    consumerConfig.remove(SaslConfigs.SASL_JAAS_CONFIG)
+    consumerConfig.remove(SaslConfigs.SASL_CLIENT_CALLBACK_HANDLER_CLASS)
 
-    val consumer2 = TestUtils.createNewConsumer(brokerList,
-                                                securityProtocol = securityProtocol,
-                                                trustStoreFile = trustStoreFile,
-                                                saslProperties = clientSaslProperties,
-                                                props = Some(consumer2Config))
-    consumers += consumer2
-
+    val consumer2 = createConsumer()
     consumer1.assign(List(tp).asJava)
     consumer2.assign(List(tp).asJava)
 
@@ -76,9 +69,13 @@ abstract class SaslEndToEndAuthorizationTest extends EndToEndAuthorizationTest {
 
     try {
       consumeRecords(consumer2)
-      fail("Expected exception as consumer2 has no access to group")
+      fail("Expected exception as consumer2 has no access to topic or group")
     } catch {
-      case _: GroupAuthorizationException => //expected
+      // Either exception is possible depending on the order that the first Metadata
+      // and FindCoordinator requests are received
+      case e: TopicAuthorizationException => assertTrue(e.unauthorizedTopics.contains(topic))
+      case e: GroupAuthorizationException => assertEquals(group, e.groupId)
     }
+    confirmReauthenticationMetrics()
   }
 }

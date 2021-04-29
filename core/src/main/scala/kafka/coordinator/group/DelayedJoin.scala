@@ -33,15 +33,17 @@ import scala.math.{max, min}
  */
 private[group] class DelayedJoin(coordinator: GroupCoordinator,
                                  group: GroupMetadata,
-                                 rebalanceTimeout: Long) extends DelayedOperation(rebalanceTimeout) {
-
-  // overridden since tryComplete already synchronizes on the group. This makes it safe to
-  // call purgatory operations while holding the group lock.
-  override def safeTryComplete(): Boolean = tryComplete()
+                                 rebalanceTimeout: Long) extends DelayedOperation(rebalanceTimeout, Some(group.lock)) {
 
   override def tryComplete(): Boolean = coordinator.tryCompleteJoin(group, forceComplete _)
-  override def onExpiration() = coordinator.onExpireJoin()
-  override def onComplete() = coordinator.onCompleteJoin(group)
+  override def onExpiration(): Unit = {
+    // try to complete delayed actions introduced by coordinator.onCompleteJoin
+    tryToCompleteDelayedAction()
+  }
+  override def onComplete(): Unit = coordinator.onCompleteJoin(group)
+
+  // TODO: remove this ugly chain after we move the action queue to handler thread
+  private def tryToCompleteDelayedAction(): Unit = coordinator.groupManager.replicaManager.tryCompleteActions()
 }
 
 /**
@@ -62,7 +64,7 @@ private[group] class InitialDelayedJoin(coordinator: GroupCoordinator,
   override def tryComplete(): Boolean = false
 
   override def onComplete(): Unit = {
-    group synchronized  {
+    group.inLock {
       if (group.newMemberAdded && remainingMs != 0) {
         group.newMemberAdded = false
         val delay = min(configuredRebalanceDelay, remainingMs)
